@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>浏览器里的 g++ — clang.wasm 在线编译运行</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --panel2: #232733; --line: #313848;
+    --fg: #d7dce6; --dim: #8b95a8; --acc: #6ea8fe; --ok: #5ec97a; --warn: #e6a648; --err: #f2777a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg); height: 100vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  header { padding: 10px 18px 8px; border-bottom: 1px solid var(--line); flex: none; }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  h1 .tag { color: var(--dim); font-size: 12px; font-weight: 400; margin-left: 8px; }
+  .sub { color: var(--dim); font-size: 12px; margin-top: 2px; }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: flex-end;
+    padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none;
+  }
+  .field { display: flex; flex-direction: column; gap: 2px; }
+  .field > span { font-size: 11px; color: var(--dim); }
+  select, input[type=text], input[type=number] {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 7px; font: 12px/1.4 ui-monospace, Consolas, monospace;
+  }
+  input[type=number] { width: 80px; }
+  #extra { width: 150px; }
+  button {
+    background: var(--acc); color: #10131a; border: 0; border-radius: 6px;
+    padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); font-weight: 500; }
+  button.danger { background: var(--err); color: #17110f; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  .grow { flex: 1; }
+  .btns { display: flex; gap: 8px; flex: none; flex-wrap: nowrap; }
+  .cap-right { display: flex; align-items: center; gap: 10px; }
+  button.mini { padding: 1px 9px; font-size: 11px; font-weight: 500; border-radius: 4px; }
+
+  /* ---------- 主体：左 70% 源码，右 30%（输入 40% / 状态 10% / 输出 50%） ---------- */
+  main {
+    flex: 1; min-height: 0; display: grid;
+    grid-template-columns: minmax(0, 70fr) minmax(0, 30fr); gap: 12px; padding: 12px 18px;
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .cap {
+    font-size: 11px; color: var(--dim); margin-bottom: 4px; flex: none;
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .right { display: grid; grid-template-rows: minmax(0, 40fr) minmax(0, 10fr) minmax(0, 50fr); gap: 10px; min-height: 0; }
+  .right > section { display: flex; flex-direction: column; min-height: 0; }
+
+  #editor {
+    flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  }
+  textarea {
+    width: 100%; flex: 1; min-height: 0; resize: none;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; font: 13px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    tab-size: 4; white-space: pre; overflow: auto;
+  }
+  #stdin { background: var(--panel); }
+  #out { background: #101216; color: #cdd6e6; }
+  textarea:focus { outline: none; border-color: var(--acc); }
+
+  /* ---------- 状态面板 ---------- */
+  .metrics {
+    border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+    padding: 4px 9px; display: flex; flex-direction: column; justify-content: center;
+    gap: 0; min-height: 0; overflow: hidden;
+  }
+  .cells { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .cell { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+  .cell > span { font-size: 10px; color: var(--dim); letter-spacing: .2px; }
+  .cell > b { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .headline { font-size: 11px; line-height: 1.3; color: var(--dim);
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim);
+         display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .dot.busy { background: var(--warn); animation: blink 1s infinite; }
+  .dot.ready { background: var(--ok); } .dot.bad { background: var(--err); }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  footer { flex: none; padding: 0 18px 8px; font-size: 12px; color: var(--dim); }
+  footer summary { cursor: pointer; color: var(--fg); font-size: 12px; }
+  footer ul { margin: 4px 0 0; padding-left: 18px; columns: 2; column-gap: 28px; }
+  footer li { margin: 1px 0; break-inside: avoid; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>浏览器里的 g++<span class="tag">clang.wasm + wasm-ld + Ace，全程零服务器</span></h1>
+  <div class="sub">工具链在 Web Worker 里执行，用户程序跑在独立的 wasm 实例中（天然沙箱）。首次加载约 58 MB：clang.wasm 31 MB + lld.wasm 19 MB + sysroot.tar 9 MB。</div>
+</header>
+
+<div class="toolbar">
+  <div class="field"><span>示例</span><select id="examples"></select></div>
+  <div class="field"><span>标准</span>
+    <select id="std">
+      <option value="c++14">-std=c++14</option>
+      <option value="c++17" selected>-std=c++17</option>
+      <option value="c++2a">-std=c++2a (不完整)</option>
+    </select>
+  </div>
+  <div class="field"><span>优化</span>
+    <select id="opt">
+      <option value="0">-O0</option>
+      <option value="1">-O1</option>
+      <option value="2" selected>-O2</option>
+      <option value="3">-O3</option>
+    </select>
+  </div>
+  <div class="field"><span>额外 cc1 参数</span>
+    <input type="text" id="extra" value="-Wall" placeholder="-Wall -Wextra -DNDEBUG">
+  </div>
+  <div class="field"><span>栈大小</span>
+    <select id="stack">
+      <option value="1048576">1 MB</option>
+      <option value="8388608" selected>8 MB</option>
+      <option value="67108864">64 MB</option>
+    </select>
+  </div>
+  <div class="field"><span>运行超时(ms)</span>
+    <input type="number" id="timeout" value="5000" min="500" step="500">
+  </div>
+  <div class="grow"></div>
+  <div class="btns">
+    <button id="run">编译并运行</button>
+    <button id="stop" class="danger" disabled>停止</button>
+    <button id="reload" class="secondary">重载工具链</button>
+  </div>
+</div>
+
+<main>
+  <div class="pane">
+    <div class="cap"><span>源代码 main.cc（Ctrl+Enter 运行）</span><span id="srclen"></span></div>
+    <div id="editor"></div>
+  </div>
+
+  <div class="pane right">
+    <section>
+      <div class="cap"><span>标准输入 stdin</span><span>喂给 cin / getline</span></div>
+      <textarea id="stdin" spellcheck="false"></textarea>
+    </section>
+
+    <section class="metrics">
+      <div class="cells">
+        <div class="cell"><span>退出码</span><b id="m-exit">—</b></div>
+        <div class="cell"><span>编译耗时</span><b id="m-compile">—</b></div>
+        <div class="cell"><span>运行耗时</span><b id="m-run">—</b></div>
+        <div class="cell"><span>内存峰值</span><b id="m-mem">—</b></div>
+      </div>
+      <div class="headline"><span class="dot" id="dot"></span><span id="msg">正在初始化工具链…</span></div>
+    </section>
+
+    <section>
+      <div class="cap">
+        <span>输出 stdout / stderr</span>
+        <span class="cap-right"><span id="outlen"></span><button id="clear" class="danger mini">清空输出</button></span>
+      </div>
+      <textarea id="out" spellcheck="false" readonly placeholder="点「编译并运行」，或按 Ctrl+Enter"></textarea>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <details>
+    <summary>已知限制</summary>
+    <ul>
+      <li>工具链是 <b>LLVM 8 年代</b>的 clang + libc++（不是 GCC/libstdc++）；<code>&lt;bits/stdc++.h&gt;</code> 与 C++20 的 <code>&lt;concepts&gt; &lt;ranges&gt; &lt;format&gt; &lt;coroutine&gt;</code> 不存在。</li>
+      <li>文件系统是空的内存 FS：<code>std::filesystem</code> 基本不可用，没有真实磁盘。</li>
+      <li><code>std::thread</code> 需要 SharedArrayBuffer + 跨源隔离，此页未启用；单线程程序不受影响。</li>
+      <li>超时靠 <code>worker.terminate()</code> 实现，能杀掉死循环，但拿不到精确 CPU 时间。</li>
+      <li>wasm 线性内存无法由宿主设上限；超分会以 <code>memory access out of bounds</code> 报出。</li>
+      <li><code>system()</code>、<code>fork()</code>、管道一类进程 API 不存在。</li>
+    </ul>
+  </details>
+</footer>
+
+<script src="vendor/ace/ace.js"></script>
+<script src="vendor/ace/ext-language_tools.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
