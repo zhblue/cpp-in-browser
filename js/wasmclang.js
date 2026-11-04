@@ -279,6 +279,11 @@
   /* ------------------------------------------------------------------ */
   class WasiApp {
     constructor(module, memfs, name, ...args) {
+      /* 允许把最后一个参数写成 {env: {...}} 用来注入额外的宿主函数
+         （argv 只会是字符串，所以这么判断是安全的）。 */
+      let options = {};
+      const last = args[args.length - 1];
+      if (last && typeof last === 'object') options = args.pop();
       this.argv = [name, ...args];
       this.environ = { USER: 'player', PATH: '/' };
       this.memfs = memfs;
@@ -366,6 +371,7 @@
           self.mem.check();
           throw new AbortError(len === -1 ? 'abort' : self.mem.readStr(msg, len));
         },
+        ...(options.env || {}),
       };
 
       const imports = {
@@ -474,6 +480,368 @@
     '-fno-color-diagnostics',
   ];
 
+  /* ------------------------------------------------------------------ */
+  /* 调试插桩：在文本 LLVM IR 的源码行边界插入行桩和变量快照               */
+  /*                                                                    */
+  /* 为什么插在 IR 而不是解析 DWARF：clang -cc1 -emit-llvm 直接给出带      */
+  /* !dbg 的文本 IR，行号在 !DILocation 里；插完之后 -cc1 -emit-obj 把它   */
+  /* 当普通 IR 输入编译回对象文件，链接时加 --allow-undefined，             */
+  /* __pg_trace 就变成模块的一个 env 导入，运行时由 JS 侧拿到行号。        */
+  /* 插桩只针对用户自己源文件里的函数：内联进来的头文件代码带 inlinedAt，   */
+  /* 不插；STL 一行一停的话事件量会爆掉。                                  */
+  /*                                                                    */
+  /* 变量值走同一条通道：-O0 下每个局部变量都有一条 llvm.dbg.declare，把    */
+  /* 它的栈槽（i32* %s 这种）绑到 !DILocalVariable 上。于是在每个行桩之前   */
+  /* 补若干条 load + 拆位 + call @__pg_var(id, lo, hi)，停在某行时宿主里的   */
+  /* 变量表就是「这一行开始前」的值，和调试器停在行首的语义一致。           */
+  /* 顺序很关键：快照必须在 __pg_trace 之前，否则停在行桩里时本行的快照      */
+  /* 还没执行，看到的全是上一行的旧值。                                    */
+  /* ------------------------------------------------------------------ */
+  const TRACE_FN = '__pg_trace';
+  const VAR_FN = '__pg_var';
+  const MAX_VAR = 512;      /* 和 js/dbgproto.js 的变量槽数量保持一致 */
+
+  /* 元数据字段：键是固定的几个，用字面量正则在模块级建一次
+     （热路径每条指令都要用，反复 new RegExp 太浪费）。
+     \bfile: 不会误命中 filename:，因为 file 后面必须紧跟冒号。 */
+  const RE_REF = {
+    file: /\bfile: !(\d+)/,
+    scope: /\bscope: !(\d+)/,
+    type: /\btype: !(\d+)/,
+    base: /\bbaseType: !(\d+)/,
+  };
+  const RE_STR = {
+    name: /\bname: "([^"]*)"/,
+    filename: /\bfilename: "([^"]*)"/,
+  };
+  const RE_NUM = {
+    line: /\bline: (\d+)/,
+    size: /\bsize: (\d+)/,
+  };
+  const RE_TAG = /\btag: (\w+)/;
+  const RE_ENC = /\bencoding: (\w+)/;
+
+  /* 能直接取值的 LLVM 标量类型；指针另行处理，结构体/数组跳过。 */
+  const SCALAR_TY = /^(i1|i8|i16|i32|i64|float|double)$/;
+
+  /* llvm.dbg.declare 的第一个操作数里类型可以带空格（[4 x i32]* %arr），
+     所以类型用懒惰匹配，结尾的 %xxx 才是明确的 SSA 值名。 */
+  const RE_DECLARE =
+    /^\s*call void @llvm\.dbg\.declare\(metadata (.+?) (%[-.\w\d]+), metadata !(\d+), metadata !DIExpression\(\)\)/;
+
+  function instrumentIR(irText, userFilename) {
+    const lines = irText.split('\n');
+
+    /* fflush 的指针类型要跟本模块里已有的声明对齐。用户只要用过 std::endl /
+       std::flush / 同步，clang 就早生成了一条 `declare i32 @fflush(%struct...)`，
+       LLVM8 用的是带类型的指针，我再用 i8* 去 call / 再 declare 一遍会撞类型、
+       报重复声明。所以：扫到已有声明就沿用它的参数类型，不再补 declare；
+       没有（只写 "\n" 的常见情况）就自己补一条 i8* 的。 */
+    let flushArgTy = 'i8*';
+    let flushAlreadyDeclared = false;
+    for (const l of lines) {
+      const dm = /^declare\b[^@]*@fflush\s*\(\s*([^,)\s][^,)]*?)\s*[,)]/.exec(l);
+      if (dm) { flushArgTy = dm[1]; flushAlreadyDeclared = true; break; }
+    }
+
+    /* !id -> 该 id 的元数据定义文本 */
+    const meta = new Map();
+    for (const l of lines) {
+      const m = /^!(\d+) = (.*)$/.exec(l);
+      if (m) meta.set(m[1], m[2]);
+    }
+    const num = (def, key) => { const m = RE_REF[key].exec(def); return m ? m[1] : null; };
+    const str = (def, key) => { const m = RE_STR[key].exec(def); return m ? m[1] : null; };
+    const field = (def, re) => { const m = re.exec(def); return m ? m[1] : null; };
+    const baseName = (p) => String(p || '').split('/').pop();
+    const want = baseName(userFilename);
+
+    /* DWARF 类型元数据 -> 主线程拿来格式化的描述。
+       typedef / const / 引用一路顺着 baseType 剥到底，枚举按底层整数类型算，
+       结构体、类、数组归成 obj（只报名字，不发值）。 */
+    const typeMemo = new Map();
+    function resolveType(id, hop) {
+      if (!id) return { kind: 'unknown', name: '?' };
+      if (typeMemo.has(id)) return typeMemo.get(id);
+      if (hop > 8) return { kind: 'unknown', name: '?' };
+      const def = meta.get(id) || '';
+      const tag = field(def, RE_TAG);
+      const nm = str(def, 'name');
+      const base = num(def, 'base');
+      let r;
+      if (/^!DIBasicType/.test(def)) {
+        const enc = field(def, RE_ENC) || '';
+        const bits = +(field(def, RE_NUM.size) || 0) || 32;
+        if (enc === 'DW_ATE_float') {
+          r = { kind: 'float', bits: bits, name: nm || (bits === 64 ? 'double' : 'float') };
+        } else if (enc === 'DW_ATE_unsigned' || enc === 'DW_ATE_unsigned_char') {
+          r = { kind: 'int', bits: bits, signed: false, name: nm || 'unsigned int' };
+        } else if (enc === 'DW_ATE_signed' || enc === 'DW_ATE_signed_char' || enc === 'DW_ATE_char') {
+          r = { kind: 'int', bits: bits, signed: true, name: nm || 'int' };
+        } else if (enc === 'DW_ATE_boolean') {
+          r = { kind: 'bool', bits: bits, name: nm || 'bool' };
+        } else if (enc === 'DW_ATE_UTF') {
+          r = { kind: 'int', bits: bits, signed: false, name: nm || 'char' };
+        } else {
+          r = { kind: 'unknown', name: nm || '?' };
+        }
+      } else if (tag === 'DW_TAG_pointer_type') {
+        r = { kind: 'ptr', bits: 32, name: (base ? resolveType(base, hop + 1).name : 'void') + '*' };
+      } else if (tag === 'DW_TAG_typedef') {
+        const b = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: '?' };
+        r = Object.assign({}, b, { alias: b.name, name: nm || b.name });
+      } else if (tag === 'DW_TAG_reference_type' || tag === 'DW_TAG_rvalue_reference_type') {
+        /* 引用在 -O0 下就是一个存地址的栈槽；标上 isRef，取值时多 load 一层，
+           这样悬停看到的是被引用到的那个值，而不是一个地址。 */
+        const b = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: '?' };
+        r = Object.assign({}, b, { isRef: true, name: (b.name || '?') + '&' });
+      } else if (tag === 'DW_TAG_const_type' || tag === 'DW_TAG_volatile_type') {
+        r = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: nm || '?' };
+      } else if (tag === 'DW_TAG_enumeration_type') {
+        const b = base ? resolveType(base, hop + 1) : null;
+        r = {
+          kind: 'int',
+          bits: b && b.bits ? b.bits : 32,
+          signed: !b || b.signed !== false,
+          name: nm || 'enum',
+        };
+      } else if (tag === 'DW_TAG_array_type') {
+        r = { kind: 'obj', name: (base ? resolveType(base, hop + 1).name : '?') + '[]' };
+      } else if (tag === 'DW_TAG_structure_type' || tag === 'DW_TAG_class_type'
+        || tag === 'DW_TAG_union_type') {
+        r = { kind: 'obj', name: nm || (tag || '').replace('DW_TAG_', '') };
+      } else {
+        r = { kind: 'unknown', name: nm || '?' };
+      }
+      typeMemo.set(id, r);
+      return r;
+    }
+
+    /* 函数 -> 是否属于用户源文件 */
+    const fnIsUser = new Map();
+    const locLine = new Map();
+    for (let i = 0; i < lines.length; ++i) {
+      const d = /^define\b/.exec(lines[i]);
+      if (!d) continue;
+      const m = /!dbg !(\d+)/.exec(lines[i]);
+      let user = false;
+      if (m) {
+        const sub = meta.get(m[1]) || '';
+        const name = str(sub, 'name') || '';
+        if (!/^_GLOBAL__sub_I/.test(name)) {
+          const f = num(sub, 'file');
+          const fd = f ? meta.get(f) : null;
+          user = !!fd && baseName(str(fd, 'filename')) === want;
+        }
+      }
+      fnIsUser.set(i, user);
+    }
+    const lineOfLoc = (id) => {
+      if (!locLine.has(id)) {
+        const def = meta.get(id) || '';
+        const m = RE_NUM.line.exec(def);
+        /* inlinedAt 说明这行是头文件里内联过来的，不是用户写的那一行 */
+        locLine.set(id, (m && !def.includes('inlinedAt:')) ? +m[1] : 0);
+      }
+      return locLine.get(id);
+    };
+
+    /* ---- 局部变量表：函数（按 define 的行号）-> 变量 id 列表 ---- */
+    const vars = [];
+    const fnVars = new Map();
+    {
+      let fid = -1, ufn = false;
+      for (let i = 0; i < lines.length; ++i) {
+        const text = lines[i];
+        if (/^define\b/.test(text)) { ufn = !!fnIsUser.get(i); fid = i; continue; }
+        if (/^}/.test(text)) { ufn = false; fid = -1; continue; }
+        if (!ufn) continue;
+        const m = RE_DECLARE.exec(text);
+        if (!m) continue;
+        const lty = m[1].trim();
+        const val = m[2];
+        const def = meta.get(m[3]) || '';
+        const name = str(def, 'name');
+        const lm = RE_NUM.line.exec(def);
+        const line = lm ? +lm[1] : 0;
+        if (!name || !line || vars.length >= MAX_VAR) continue;
+        const t = resolveType(num(def, 'type'), 0);
+        const id = vars.length;
+        vars.push({
+          id: id, name: name, line: line, fn: fid, lty: lty, val: val,
+          kind: t.kind, bits: t.bits || 0, signed: !!t.signed,
+          isRef: !!t.isRef, tname: t.name,
+        });
+        if (!fnVars.has(fid)) fnVars.set(fid, []);
+        fnVars.get(fid).push(id);
+      }
+    }
+
+    const out = [];
+    const traced = new Set();
+    const lineVars = new Map();   /* 行号 -> 这一行快照过的变量 id 集合 */
+    let tmp = 0;                  /* 临时 SSA 值编号，全模块唯一 */
+    let userFn = false;
+    let fnId = -1;
+    let blockLine = 0;      /* 当前基本块里最后一次插桩的行 */
+    let pending = 0;        /* 因为块首必须是 phi 而推迟的插桩行 */
+    let usedFlush = false;  /* 是否插过 fflush —— 决定要不要补那条 declare */
+
+    /* phi / landingpad 这类指令按 LLVM 文本格式必须排在同块其它指令前面，
+       插桩只能往后压到第一条普通指令之前。只看操作符位置，避免把
+       用户变量名里的 "phi" 误判成指令。 */
+    const mustStayFirst = (s) =>
+      /^\s*(?:landingpad|catchpad|cleanuppad|catchswitch|token)\b/.test(s)
+      || /=\s*phi\b/.test(s);
+
+    /* 把某个变量的当前值压成两个 i32 交给宿主；取不了值就返回 null。 */
+    function varRecord(v) {
+      if (v.kind === 'obj' || v.kind === 'unknown') return null;
+      const code = [];
+      const n = tmp++;
+      let valTy, valRef;
+      if (/\*$/.test(v.lty)) {
+        /* 变量住在栈槽里：先把它 load 出来 */
+        valTy = v.lty.replace(/\*$/, '');
+        valRef = `%pgv${n}`;
+        code.push(`  ${valRef} = load ${valTy}, ${v.lty} ${v.val}`);
+      } else {
+        /* 值本来就在 SSA 寄存器里（-O0 下按值传参才会这样） */
+        valTy = v.lty;
+        valRef = v.val;
+      }
+      if (v.isRef && /\*$/.test(valTy)) {
+        /* 引用：槽里存的是被引用对象的地址，再 load 一层才是值本身 */
+        const inner = valTy.replace(/\*$/, '');
+        if (SCALAR_TY.test(inner) || /\*$/.test(inner)) {
+          const r = `%pgr${n}`;
+          code.push(`  ${r} = load ${inner}, ${valTy} ${valRef}`);
+          valTy = inner;
+          valRef = r;
+        }
+      }
+      let lo, hi = '0';
+      if (SCALAR_TY.test(valTy)) {
+        if (valTy === 'i32') {
+          lo = valRef;
+        } else if (valTy === 'i1' || valTy === 'i8' || valTy === 'i16') {
+          lo = `%pgl${n}`;
+          code.push(`  ${lo} = zext ${valTy} ${valRef} to i32`);
+        } else if (valTy === 'i64') {
+          lo = `%pgl${n}`; hi = `%pgh${n}`;
+          code.push(`  ${lo} = trunc i64 ${valRef} to i32`);
+          code.push(`  %pgs${n} = lshr i64 ${valRef}, 32`);
+          code.push(`  ${hi} = trunc i64 %pgs${n} to i32`);
+        } else if (valTy === 'float') {
+          lo = `%pgl${n}`;
+          code.push(`  ${lo} = bitcast float ${valRef} to i32`);
+        } else {
+          lo = `%pgl${n}`; hi = `%pgh${n}`;
+          code.push(`  %pgb${n} = bitcast double ${valRef} to i64`);
+          code.push(`  ${lo} = trunc i64 %pgb${n} to i32`);
+          code.push(`  %pgs${n} = lshr i64 %pgb${n}, 32`);
+          code.push(`  ${hi} = trunc i64 %pgs${n} to i32`);
+        }
+      } else if (/\*$/.test(valTy)) {
+        lo = `%pgl${n}`;
+        code.push(`  ${lo} = ptrtoint ${valTy} ${valRef} to i32`);
+      } else {
+        return null;   /* 结构体、数组之类：名单里留着名字，但不发值 */
+      }
+      code.push(`  call void @${VAR_FN}(i32 ${v.id}, i32 ${lo}, i32 ${hi})`);
+      return code;
+    }
+
+    /* 一个行边界上要插入的内容：先变量快照，再行桩 */
+    function snapshot(fn, line) {
+      const list = fnVars.get(fn);
+      if (!list) return;
+      let ids = null;
+      for (const id of list) {
+        const v = vars[id];
+        if (v.line > line) continue;
+        const code = varRecord(v);
+        if (code) { for (const c of code) out.push(c); }
+        else if (v.kind !== 'obj' && v.kind !== 'unknown') continue;
+        if (!ids) ids = [];
+        ids.push(id);
+      }
+      if (!ids) return;
+      if (!lineVars.has(line)) lineVars.set(line, new Set());
+      const s = lineVars.get(line);
+      for (const id of ids) s.add(id);
+    }
+
+    const emit = (line) => {
+      snapshot(fnId, line);
+      /* 停在某行之前先把程序已产生的输出冲出去。libc++ 的 std::cout 是
+         sync_with_stdio(true)，数据压在 C 的 stdout 缓冲里，不 fflush 就
+         要等写满 / std::endl / 程序结束才到宿主。fflush 放在行桩之前：
+         执行到第 N 行、park 住的时候，1..N-1 行写过的内容已经在输出框里了。 */
+      /* fflush 有返回值，必须给它一个显式的非数字名（借用 tmp 计数器，和
+         变量快照的 %pgv/%pgl 同一命名空间）。裸写 `call i32 @fflush(...)`
+         是个匿名值，LLVM 会自动分配 %0/%1/... 编号，跟 clang 自己写的
+         `%0 = bitcast`、`%1 = load` 撞号，报 "instruction expected to be
+         numbered"。__pg_trace 是 void 没这问题。 */
+      const f = `%pgf${tmp++}`;
+      out.push(`  ${f} = call i32 @fflush(${flushArgTy} null)`);
+      usedFlush = true;
+      out.push(`  call void @${TRACE_FN}(i32 ${line})`);
+      traced.add(line);
+      blockLine = line;
+    };
+
+    for (let i = 0; i < lines.length; ++i) {
+      const text = lines[i].replace(/\s+$/, '');
+
+      if (/^define\b/.test(text)) {
+        userFn = !!fnIsUser.get(i);
+        fnId = i;
+        blockLine = 0; pending = 0;
+        out.push(text);
+        continue;
+      }
+      if (/^}/.test(text)) {
+        /* 走到这里 pending 必然已经清零：每个块都以终结指令收尾，
+           而终结指令不是 mustStayFirst，插桩在它之前就已发出。
+           这里不再补发，否则会插到 ret/br 之后变成非法 IR。 */
+        userFn = false; fnId = -1; blockLine = 0; pending = 0;
+        out.push(text);
+        continue;
+      }
+      if (!userFn) { out.push(text); continue; }
+
+      /* 基本块标签（不缩进、整行只有 label:）：块内行号状态要重置 */
+      if (/^\S+:$/.test(text)) { blockLine = 0; pending = 0; out.push(text); continue; }
+
+      const m = /, !dbg !(\d+)$/.exec(text);
+      if (!/^\s/.test(text) || !m) { out.push(text); continue; }
+      const line = lineOfLoc(m[1]);
+      if (!line) { out.push(text); continue; }
+
+      if (pending && !mustStayFirst(text)) { emit(pending); pending = 0; }
+      if (line !== blockLine) {
+        if (mustStayFirst(text)) { pending = line; blockLine = line; }
+        else emit(line);
+      }
+      out.push(text);
+    }
+
+    out.push('');
+    out.push(`declare void @${TRACE_FN}(i32)`);
+    if (vars.length) out.push(`declare void @${VAR_FN}(i32, i32, i32)`);
+    if (usedFlush && !flushAlreadyDeclared) out.push(`declare i32 @fflush(${flushArgTy})`);
+
+    const lv = {};
+    for (const [line, set] of lineVars) lv[String(line)] = [...set].sort((a, b) => a - b);
+    return {
+      ir: out.join('\n'),
+      lines: [...traced].sort((a, b) => a - b),
+      vars: vars,
+      lineVars: lv,
+    };
+  }
+
   class Toolchain {
     /* options: {readBuffer(name)->ArrayBuffer, compileModule(name)->Module, onWrite(bytes)} */
     constructor(options) {
@@ -560,12 +928,23 @@
       }
 
       const lld = await this.getModule(o.lld || 'lld.wasm');
+      const lres = await this.link(obj, out, stackSize, lld);
+      if (lres.code !== 0 || !this.memfs.hasFile(out)) {
+        return { ok: false, phase: 'link', exitCode: lres.code, wasm: null };
+      }
+      return { ok: true, wasm: this.memfs.getFileContents(out), exitCode: 0 };
+    }
+
+    /* 链接：正常路径和调试路径共用，调试路径多给一个 --allow-undefined，
+       让 __pg_trace 落到模块的 env 导入上，由运行侧的 JS 实现。 */
+    async link(obj, out, stackSize, lld, extraLd = []) {
       const libdir = 'lib/wasm32-wasi';
       /* libc++.a 里的 long double / 128 位比较会引用 __lttf2/__getf2 这类
          compiler-rt 符号，必须显式链上 builtins 库。 */
       const builtins = 'lib/clang/8.0.1/lib/wasi';
       const ldArgs = [
         'wasm-ld', '--no-threads', '--export-dynamic',
+        ...extraLd,
         '-z', `stack-size=${stackSize}`,
         `-L${libdir}`, `-L${builtins}`,
         `${libdir}/crt1.o`, obj,
@@ -573,16 +952,76 @@
         '-lclang_rt.builtins-wasm32',
         '-o', out,
       ];
-      const lres = await this.runTool(lld, ...ldArgs);
+      if (!lld) lld = await this.getModule('lld.wasm');
+      return await this.runTool(lld, ...ldArgs);
+    }
+
+    /* 可调试构建：源码 -> 文本 IR -> 行插桩 + 变量快照 -> 对象 -> 链接。
+       返回 {ok, phase, exitCode, wasm, lines, vars, lineVars}：
+       lines 是插了桩的源码行号，vars/lineVars 是变量表和「哪行快照了哪些变量」。 */
+    async compileForDebug(source, opts) {
+      const o = opts || {};
+      const filename = o.filename || 'main.cc';
+      const obj = o.obj || 'main.dbg.o';
+      const irFile = 'main.dbg.ll';
+      const instrFile = 'main.instr.ll';
+      const out = o.output || 'main.dbg.wasm';
+      const std = o.std || 'c++17';
+      const stackSize = o.stackSize || 8 * 1024 * 1024;
+      const extra = (o.flags || [])
+        .join(' ').trim().split(/\s+/).filter((s) => s && s !== '-cc1');
+
+      await this.init();
+      this.memfs.addFile(filename, textEncoder.encode(source));
+
+      const clang = await this.getModule(o.clang || 'clang.wasm');
+      /* -emit-llvm 单用（不带 -S）出的是文本 IR；带上 -S 反而变成 wasm 汇编。
+         行号来自 -debug-info-kind=standalone，cc1 不认 -g。
+         插桩构建必须 -O0：优化会把行边界抹掉、语句重排，高亮会乱跳。 */
+      const emitIR = [
+        'clang', '-cc1', '-emit-llvm',
+        '-debug-info-kind=standalone',
+        ...CLANG_COMMON,
+        `-std=${std}`,
+        '-triple=wasm32-wasi',
+        '-O0',
+        ...extra,
+        '-o', irFile, '-x', 'c++', filename,
+      ];
+      const cres = await this.runTool(clang, ...emitIR);
+      if (cres.code !== 0 || !this.memfs.hasFile(irFile)) {
+        return { ok: false, phase: 'compile', exitCode: cres.code, wasm: null };
+      }
+
+      const irText = new TextDecoder('utf-8').decode(this.memfs.getFileContents(irFile));
+      const instr = instrumentIR(irText, filename);
+      if (!instr.lines.length) {
+        return { ok: false, phase: 'instrument', exitCode: 0, wasm: null };
+      }
+      this.memfs.addFile(instrFile, textEncoder.encode(instr.ir));
+
+      const ores = await this.runTool(clang,
+        'clang', '-cc1', '-emit-obj', '-triple=wasm32-wasi', '-O0',
+        '-o', obj, instrFile);
+      if (ores.code !== 0 || !this.memfs.hasFile(obj)) {
+        return { ok: false, phase: 'compile', exitCode: ores.code, wasm: null };
+      }
+
+      const lld = await this.getModule(o.lld || 'lld.wasm');
+      const lres = await this.link(obj, out, stackSize, lld, ['--allow-undefined']);
       if (lres.code !== 0 || !this.memfs.hasFile(out)) {
         return { ok: false, phase: 'link', exitCode: lres.code, wasm: null };
       }
-      return { ok: true, wasm: this.memfs.getFileContents(out), exitCode: 0 };
+      return {
+        ok: true, wasm: this.memfs.getFileContents(out),
+        lines: instr.lines, exitCode: 0,
+        vars: instr.vars, lineVars: instr.lineVars,
+      };
     }
   }
 
   global.WasmClang = {
     Toolchain, MemFS, WasiApp, Tar, Memory, ProcExit, NotImplemented, AbortError,
-    textEncoder,
+    textEncoder, instrumentIR, TRACE_FN,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

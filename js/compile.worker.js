@@ -61,9 +61,12 @@ self.onmessage = async (ev) => {
 
     if (m.type === 'compile') {
       const t0 = performance.now();
+      const debug = !!(m.opts && m.opts.debug);
       tc.setSink(postWrite);
-      postMessage({ type: 'stage', stage: 'compile' });
-      const res = await tc.compileAndLink(m.code, m.opts);
+      postMessage({ type: 'stage', stage: debug ? 'compile-debug' : 'compile' });
+      const res = debug
+        ? await tc.compileForDebug(m.code, m.opts)
+        : await tc.compileAndLink(m.code, m.opts);
       tc.setSink(null);
       const ms = Math.round(performance.now() - t0);
       if (!res.ok) {
@@ -74,7 +77,8 @@ self.onmessage = async (ev) => {
       }
       postMessage({
         type: 'result', ok: true, ms, bytes: res.wasm.byteLength,
-        wasm: res.wasm,
+        wasm: res.wasm, lines: res.lines || null, debug: debug,
+        vars: res.vars || null, lineVars: res.lineVars || null,
       }, [res.wasm.buffer]);
       return;
     }
