@@ -481,6 +481,54 @@
   ];
 
   /* ------------------------------------------------------------------ */
+  /* 万能头 <bits/stdc++.h>                                               */
+  /*                                                                    */
+  /* GCC 的 libstdc++ 有这个文件，libc++ 没有。sysroot.tar 是预打包好的， */
+  /* 不动它，改成解包之后往 memfs 里补一个虚拟文件：clang 的头搜索路径里   */
+  /* 有 /include/c++/v1，所以 include/c++/v1/bits/stdc++.h 正好被         */
+  /* <bits/stdc++.h> 命中，竞赛代码可以照抄。                             */
+  /* 里面列的都是这份 sysroot 实测能过编译的头（逐个 include 编过一遍）。
+     故意不收的三类：
+       <csetjmp>  —— sysroot 里没有 setjmp.h，libc++ 的 setjmp.h 用 #include_next
+                      找它，直接 fatal error；
+       <csignal>  —— wasi-libc 的 signal.h 不提供 ::signal，<csignal> 里的
+                      using ::signal 编译不过；
+       <thread> <mutex> <future> <condition_variable> <shared_mutex> <filesystem>
+                  —— 头本身能编过，但这份 sysroot 没有 pthread / 没有对应的系统
+                      调用，真去用就是链接期未定义符号或运行期 trap，收进万能头
+                      等于给所有人埋雷。要用请显式 include。
+       <regex>    —— 能编，但模板展开很重，课程用不上，不值得让每次编译都背。
+     <ccomplex> <ctgmath> <ciso646> <cstdbool> 也不收：C++17 已废弃，-Wall 下
+     会刷一堆 deprecation 警告。                                              */
+  /* ------------------------------------------------------------------ */
+  const UMBRELLA_DIR = 'include/c++/v1/bits';
+  const UMBRELLA_PATH = UMBRELLA_DIR + '/stdc++.h';
+  const UMBRELLA_INCLUDES = [
+    'cassert', 'cctype', 'cerrno', 'cfloat', 'climits', 'clocale', 'cmath',
+    'cstdarg', 'cstddef', 'cstdint', 'cstdio', 'cstdlib', 'cstring', 'ctime',
+    'cwchar', 'cwctype',
+    'algorithm', 'array', 'atomic', 'bitset', 'chrono', 'complex', 'deque',
+    'exception', 'forward_list', 'fstream', 'functional', 'initializer_list',
+    'iomanip', 'ios', 'iosfwd', 'iostream', 'istream', 'iterator', 'limits',
+    'list', 'locale', 'map', 'memory', 'new', 'numeric', 'optional', 'ostream',
+    'queue', 'random', 'ratio', 'scoped_allocator', 'set', 'sstream', 'stack',
+    'stdexcept', 'streambuf', 'string', 'string_view', 'system_error', 'tuple',
+    'type_traits', 'typeindex', 'typeinfo', 'unordered_map', 'unordered_set',
+    'utility', 'valarray', 'variant', 'vector',
+  ];
+  const UMBRELLA_TEXT = '// bits/stdc++.h —— 本环境在 sysroot 之外补的虚拟头，libc++ 自己不带\n'
+    + '#pragma once\n'
+    + UMBRELLA_INCLUDES.map((h) => `#include <${h}>`).join('\n') + '\n';
+
+  /* 返回 1 = 补上了，0 = 已存在（不覆盖 sysroot 里可能带来的同名文件） */
+  function addUmbrellaHeader(memfs) {
+    try { if (memfs.hasFile(UMBRELLA_PATH)) return 0; } catch (e) { /* FindNode 会 trap */ }
+    try { memfs.addDirectory(UMBRELLA_DIR); } catch (e) { /* 目录已存在 */ }
+    memfs.addFile(UMBRELLA_PATH, textEncoder.encode(UMBRELLA_TEXT));
+    return 1;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 调试插桩：在文本 LLVM IR 的源码行边界插入行桩和变量快照               */
   /*                                                                    */
   /* 为什么插在 IR 而不是解析 DWARF：clang -cc1 -emit-llvm 直接给出带      */
@@ -873,8 +921,10 @@
         this.options.onProgress && this.options.onProgress('解压标准库头文件 sysroot.tar');
         const tar = new Tar(await this.options.readBuffer('sysroot.tar'));
         const n = tar.untar(this.memfs);
-        this.options.onProgress && this.options.onProgress(`已装入 ${n} 个头文件/库`);
-        this.sysrootFiles = n;
+        /* 补一个 <bits/stdc++.h>，见上面 UMBRELLA_* 的说明 */
+        const extra = addUmbrellaHeader(this.memfs);
+        this.options.onProgress && this.options.onProgress(`已装入 ${n + extra} 个头文件/库`);
+        this.sysrootFiles = n + extra;
         this.initMs = Date.now() - t0;
       })();
       return this.ready;
