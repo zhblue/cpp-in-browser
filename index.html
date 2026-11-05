@@ -42,6 +42,12 @@
   }
   .field { display: flex; flex-direction: column; gap: 2px; }
   .field > span { font-size: 11px; color: var(--dim); }
+  /* 工具条里的复选框（BGM）：和标题右侧的「白天」开关同一套观感 */
+  .field label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+                 user-select: none; white-space: nowrap; font-size: 12px;
+                 background: var(--panel2); border: 1px solid var(--line);
+                 border-radius: 5px; padding: 4px 7px; }
+  .field label input[type=checkbox] { cursor: pointer; accent-color: var(--acc); }
   select, input[type=text], input[type=number] {
     background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
     border-radius: 5px; padding: 4px 7px; font: 12px/1.4 ui-monospace, Consolas, monospace;
@@ -227,6 +233,9 @@
       <option value="1">10⁻⁶ s</option>
     </select>
   </div>
+  <div class="field" title="调试时把当前执行行的个位弹成音符：1=中音 do（C4），2..7 依次 re mi fa sol la si，8/9/0 接着往高八度走（do re mi）。只在「编译并调试」里有声音，普通运行没有行号可跟；全速跑会限流，不是每行一声。取消勾选就静音，选择会记住"><span>BGM</span>
+    <label><input type="checkbox" id="bgm" checked> 行号个位 → 音符</label>
+  </div>
   <div class="grow"></div>
   <div class="btns">
     <button id="run">编译并运行</button>
@@ -243,7 +252,7 @@
   <button id="dbg-quit" class="danger">退出调试</button>
   <div class="state" id="dbgstate">—</div>
   <div class="grow"></div>
-  <div class="hint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌快就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去</div>
+  <div class="hint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选</div>
 </div>
 
 <main>

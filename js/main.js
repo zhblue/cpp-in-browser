@@ -84,6 +84,77 @@ const FONT_KEY = 'cpp-playground.fontsize';
   });
 })();
 
+/* ---------- BGM：把当前执行行的个位弹成音符 ----------
+   锚点按要求定：个位 1 = C 大调中音 do（C4）。2..7 顺下去 re mi fa sol la si，
+   8 / 9 / 0 接着往高八度走（C5 D5 E5）——十位进位之前音高一路向上，整十行之后
+   落回高八度的 do，听起来像一句句往上翻，而不是随机乱跳。
+   只在调试会话里响：普通「编译并运行」没有行号可跟，自然也没音可弹。
+   工具条的复选框能关掉，选择记进 localStorage。 */
+const BGM_KEY = 'cpp-playground.bgm';
+/* 相对 C4 的半音数：大调 1234567 = 0 2 4 5 7 9 11，8 9 0 是下一八度的 1 2 3 */
+const BGM_SEMITONE = { 1: 0, 2: 2, 3: 4, 4: 5, 5: 7, 6: 9, 7: 11, 8: 12, 9: 14, 0: 16 };
+const bgm = { ac: null, lastDigit: -1, lastAt: 0, notes: 0 };
+
+function bgmOn() { const cb = $('bgm'); return !!(cb && cb.checked); }
+
+function bgmNote(line) {
+  if (!bgmOn() || line <= 0) return;
+  const d = line % 10;
+  const now = performance.now();
+  /* 同一个音不重复敲：停在某行时 tick 每 50 ms 就来一趟；两次发声之间至少隔
+     45 ms：全速档一秒能划过几千行，不限流就成了一堵噪音墙，AudioNode 也会堆。 */
+  if (d === bgm.lastDigit && now - bgm.lastAt < 400) return;
+  if (now - bgm.lastAt < 45) return;
+  bgm.lastDigit = d;
+  bgm.lastAt = now;
+
+  let ac = bgm.ac;
+  if (!ac) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try { ac = bgm.ac = new AC({ latencyHint: 'interactive' }); } catch (e) { return; }
+  }
+  /* 浏览器不让没有用户手势的 AudioContext 起播；点「编译并调试」本身就是手势，
+     但自动播放策略偶尔还是会把新开的 ctx 停在 suspended，这里补一次 resume。 */
+  if (ac.state === 'suspended') ac.resume().catch(() => {});
+
+  const f = 261.6256 * Math.pow(2, BGM_SEMITONE[d] / 12);   /* A4=440 十二平均律下的 C4 */
+  const t = ac.currentTime;
+  const amp = ac.createGain();
+  amp.gain.setValueAtTime(0.0001, t);
+  amp.gain.linearRampToValueAtTime(0.16, t + 0.006);        /* 几毫秒起音，接近拨弦/音盒 */
+  amp.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);  /* 0.3 s 收干净，音符之间不糊 */
+  amp.connect(ac.destination);
+  /* 三角波基音 + 高八度正弦泛音：单振荡器太"嘟嘟叫"，叠一层八度才有音乐盒味 */
+  [[f, 'triangle', 1], [f * 2, 'sine', 0.35]].forEach((p) => {
+    const o = ac.createOscillator();
+    o.type = p[1];
+    o.frequency.value = p[0];
+    const g = ac.createGain();
+    g.gain.value = p[2];
+    o.connect(g);
+    g.connect(amp);
+    o.start(t);
+    o.stop(t + 0.34);
+  });
+  bgm.notes++;
+}
+
+(function initBgm() {
+  const cb = $('bgm');
+  if (!cb) return;
+  try {
+    const v = localStorage.getItem(BGM_KEY);
+    if (v !== null) cb.checked = v === 'on';
+  } catch (e) { /* 隐私模式读不到就按 HTML 里的默认值 */ }
+  cb.addEventListener('change', () => {
+    try { localStorage.setItem(BGM_KEY, cb.checked ? 'on' : 'off'); } catch (e) {}
+    bgm.lastDigit = -1;
+    /* 勾上的时候给一声确认，不然安静的页面上看不出到底生效没有 */
+    if (cb.checked) bgmNote(dbg.lastLine > 0 ? dbg.lastLine : 1);
+  });
+})();
+
 function setSource(text) {
   srcEditor.setValue(text, -1);
   srcEditor.clearSelection();
@@ -1085,8 +1156,12 @@ function onCompileMessage(ev) {
       break;
     case 'error':
       setDot('bad');
-      say('编译器侧错误', 'err');
-      outEl.value += '\n' + m.message + '\n';
+      say('工具链没能装入，原因见输出框', 'err');
+      /* 把页面实际请求的 assets 前缀一起打出来：部署出问题时，这一行和上面的
+         完整 URL 能直接对上是路径错了（404）、被中间层改了（返回 HTML）、
+         还是压根没发出去（证书/CSP/COEP）。 */
+      outEl.value += '\n' + m.message + '\n（资源前缀 BASE = ' + BASE + '，' +
+        '可在控制台执行 fetch(BASE + "clang.wasm", {method: "HEAD"}).then(r => console.log(r.status, r.headers.get("content-type"), r.headers.get("content-length"))) 自查）\n';
       if (readyReject) readyReject(new Error(m.message));
       compileReject && compileReject({ jsError: m.message });
       break;
@@ -1266,6 +1341,24 @@ const dbg = {
 
 function dbgSupported() { return typeof SharedArrayBuffer !== 'undefined'; }
 
+/* 拿不到 SharedArrayBuffer 时，把到底缺哪一层说清楚。三个条件是串联的：
+   安全上下文 → COOP/COEP → crossOriginIsolated → SAB。旧文案只提第二个，
+   结果 http 公网域名下照着加头，加完还是不行 —— 非安全上下文里 SAB 压根
+   不存在，加什么头都没用，这一步必须先看 isSecureContext。 */
+function sabMissing() {
+  if (typeof SharedArrayBuffer !== 'undefined' && self.crossOriginIsolated) return '';
+  if (!self.isSecureContext)
+    return `当前不是安全上下文（${location.protocol}//${location.host}）：` +
+      'SharedArrayBuffer 只在 https、或 http://localhost / 127.0.0.1 下才存在，' +
+      '光加 COOP/COEP 响应头没用，先把站点切到 https（或本地用 serve.py 打开）';
+  if (typeof SharedArrayBuffer === 'undefined')
+    return '这个浏览器里没有 SharedArrayBuffer（版本太旧，或被隐私/企业策略关掉了）';
+  return '安全上下文没问题，但页面没拿到跨源隔离：文档响应里缺 ' +
+    'Cross-Origin-Opener-Policy: same-origin 或 Cross-Origin-Embedder-Policy: require-corp。' +
+    'nginx 的坑是 add_header 不继承 —— 某个 location 一旦自己写了 add_header，' +
+    '上层那两个头就不再落到这个响应上，补完记得硬刷新（旧文档响应会被缓存）';
+}
+
 function dbgCmd(mode) {
   if (!dbg.ctl) return;
   hideVarTip();
@@ -1363,6 +1456,7 @@ function dbgTick() {
     dbg.lastLine = line;
     dbg.lastParked = parked;
     dbgMarkLine(line, parked);
+    bgmNote(line);      /* 行号变了才弹一声，个位决定音高（见 BGM 一节） */
     /* 跟着执行行走：
        停住时 gotoLine —— 光标也一起过去（Ace 的 gotoLine 自带居中），这样停下行
          直接悬停变量名就能看值；
@@ -1516,7 +1610,7 @@ function dbgQuit() {
 
 async function startDebugSession(built) {
   const cb = DBG.newControlBlock();
-  if (!cb) { say('拿不到 SharedArrayBuffer，无法调试', 'err'); return; }
+  if (!cb) { say('建不起调试控制块（SharedArrayBuffer）：' + (sabMissing() || '原因不明'), 'err'); return; }
   const lines = built.lines;
   cb.wr.fill(0);
   dbg.cb = cb; dbg.ctl = cb.ctl; dbg.bp = cb.bp; dbg.lines = lines;
@@ -1528,6 +1622,7 @@ async function startDebugSession(built) {
   syncBpTable();
 
   dbg.active = true;
+  bgm.lastDigit = -1;      /* 新会话第一行一定要出声，别被上一段的「同音不重复」挡掉 */
   dbgBar.classList.add('on');
   srcEditor.setReadOnly(true);
   runBtn.disabled = true;
@@ -1571,7 +1666,7 @@ async function doDebug() {
   if (dbg.active) { dbgStopRun(); dbgQuit(); return; }
   if (!dbgSupported()) {
     setDot('bad');
-    say('调试需要 SharedArrayBuffer：请从带 COOP/COEP 响应头的 serve.py 打开本页', 'err');
+    say('调试需要 SharedArrayBuffer：' + (sabMissing() || '条件看着都满足，可能被浏览器扩展拦了'), 'err');
     return;
   }
   busy = true;

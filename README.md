@@ -16,7 +16,7 @@ python3 serve.py 8765
 
 然后打开 <http://127.0.0.1:8765/index.html>，等状态栏从"正在初始化工具链…"变成绿点的"工具链就绪"。首次要下载约 60 MB 工具链（页头写的 58 MB 是按 MiB 算的同一个数），就绪耗时页面自己会报在那行里（实测 HTTP 缓存和浏览器 wasm 代码缓存都命中时是 0.1 秒，冷启动主要耗在下载上）。之后 `assets/` 和 `vendor/` 走一年长缓存，再开基本秒就绪。
 
-换任何静态服务器都行，只要注意三点：`.wasm` 建议给 `application/wasm` 这个 MIME（不对的话会退化成先收完整字节再编译，能用但慢）；如果加了 CSP，必须允许 `'wasm-unsafe-eval'`（或 `'unsafe-eval'`），否则 wasm 编译本身会被拒；要用单步调试就必须带上 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`（`serve.py` 已经带上了）——没有这两个响应头就没有跨源隔离，`SharedArrayBuffer` 拿不到，调试器停不住。
+换任何静态服务器都行，只要注意四点：`.wasm` 建议给 `application/wasm` 这个 MIME（不对的话会退化成先收完整字节再编译，能用但慢）；如果加了 CSP，必须允许 `'wasm-unsafe-eval'`（或 `'unsafe-eval'`），否则 wasm 编译本身会被拒；要用单步调试就必须带上 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`（`serve.py` 已经带上了）——没有这两个响应头就没有跨源隔离，`SharedArrayBuffer` 拿不到，调试器停不住；**而这两个头只在安全上下文里有效**：`http://公网域名` 下加满了头也不会有 `SharedArrayBuffer`，必须是 `https://`，或本机的 `http://localhost` / `http://127.0.0.1`。这条是 nginx 部署最容易踩的，见下面「部署建议」。
 
 ## 界面与操作
 
@@ -28,6 +28,7 @@ python3 serve.py 8765
 | 额外 cc1 参数 | 原样拼进 `clang -cc1`，默认 `-Wall`。可加 `-Wextra`、`-DNDEBUG` 之类 |
 | 栈大小 | 链接参数 `-z stack-size`，默认 8 MB；深递归用例可调到 64 MB |
 | 字号 | 源码编辑器字号，12 / 13 / 14（默认）/ 16 / 18 / 20 / 24 px，选完立刻生效并记进 `localStorage`，刷新保留。投影演示建议 16 px 以上 |
+| BGM | 复选框，默认开。调试时把**当前执行行的个位**弹成一个音符：个位 1 = C 大调中音 do（C4），2..7 依次 re mi fa sol la si，8 / 9 / 0 接着往高八度走（C5 D5 E5）。取消勾选就静音，选择记进 `localStorage`；勾上的当下会响一声作为确认。只有「编译并调试」有声——普通「编译并运行」没有行号可跟 |
 | 运行超时(ms) | 看门狗时长，默认 5000。到点直接终止运行用的 Worker。**只作用于「编译并运行」**，「编译并调试」不设超时 |
 | 编译并运行 | `Ctrl+Enter`（macOS `Cmd+Enter`） |
 | 编译并调试 | `Ctrl+Shift+Enter`（macOS `Cmd+Shift+Enter`），见下面「单步调试」一节 |
@@ -63,6 +64,8 @@ python3 serve.py 8765
 
 **及时看到程序的输出**：程序用 `std::endl` / `std::flush` 写的行本来就会立刻刷出来，但竞赛风格地只写 `"\n"` 时，内容其实压在 libc++ 的 C `stdout` 缓冲里（`sync_with_stdio` 默认开着），要等写满 1 KB 或程序结束才到宿主。调试构建在每个行桩、`__pg_trace` 之前多插一条 `fflush(null)`，所以停在某行、或降速逐行走的时候，前面几行 `cout` 出去的内容已经实时进到了输出框。小坑：这条 `call` 的返回值必须给一个显式非数字名（借用插桩自己的 `tmp` 计数器），裸写匿名 `call i32 @fflush` 会被 LLVM 自动占一个 `%0/%1/…` 编号，跟 clang 原样抄下来的 `%0 = bitcast`、`%1 = load` 撞号，报 "instruction expected to be numbered"；`__pg_trace` 是 `void`，没这问题。（若程序自己 `sync_with_stdio(false)`，`std::cout` 改用 libc++ 内部缓冲，这条 `fflush` 刷不动它——教学用例没人这么写。）
 
+**BGM：行号当旋律**：`dbgTick` 发现行号变了就调 `bgmNote(line)`，取 `line % 10` 查半音表（`{1:0, 2:2, 3:4, 4:5, 5:7, 6:9, 7:11, 8:12, 9:14, 0:16}`，相对 C4），按 A4=440 的十二平均律算频率，用 Web Audio 发一声：三角波基音 + 高八度正弦泛音（0.35 倍），6 ms 起音、0.32 s 指数衰减，像音乐盒而不拖尾。两处限流是必须的：同一个音 400 ms 内不重复敲（停在某行时 tick 每 50 ms 就来一趟，不然一个音能敲几十次），两次发声之间至少隔 45 ms（全速档一秒划过几千行，不限流就是一堵噪音墙，AudioNode 也会堆一堆）。`AudioContext` 第一次出声时才建，建在用户手势之后（点「编译并调试」本身就是手势），万一还是 `suspended` 就补一次 `resume()`。复选框关掉立刻不出声，状态记进 `localStorage`，重新勾选时先响一声确认。
+
 **每次运行都从空输出开始**：点「编译并运行」「编译并调试」都会先清掉输出框和上一次的解码头，运行/编译的诊断直接落进干净框里，不再和历史输出叠在一起。
 
 **耗时口径**：停在某行上想下一步的时间、降速刻意睡掉的时长都不是程序在跑。控制块里 `PARKED_MS` / `SLOW_MS` 两个槽由 Worker 累加，状态栏的运行耗时是总耗时减去这两段，鼠标悬在数字上能看到各扣了多少。降速的睡眠按 50 ms 一片——片小一点，按「暂停」时下一行很快就能停住，不用先把一整秒睡满；记账是先加计划片长、醒来再补实际超出的那几毫秒，只记计划值的话报表里的降速时间会偏小，扣不干净。
@@ -71,7 +74,7 @@ python3 serve.py 8765
 
 **看变量的实现细节**：停住时鼠标悬在变量名上取值，不能用 `e.target` 是不是 `.ace_identifier` 那个 span 来判断——Ace 的 `.ace_layer` 整层 `pointer-events: none`（它 CSS 里写了，为了 Safari 滚轮不被打断），真实鼠标事件的 target 永远是 `div.ace_content`。走的是坐标反查：`renderer.screenToTextCoordinates(clientX, clientY)` 拿行列，再 `session.getTokenAt(row, column)` 取该位置的 token。
 
-**前提与限制**：`SharedArrayBuffer` 要求跨源隔离，`serve.py` 已经带 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`，用别的服务器要自己加，否则页面会直说"拿不到 SharedArrayBuffer，无法调试"。行号可信的前提是 `-O0`，调试构建不接受优化档位；STL 头文件里的实现不插桩，所以单步进不了 `std::sort` 内部；这套行号来自 IR 元数据而不是 DWARF 的 `.debug_line`，够教学演示，但别按 gdb 的语义期待它。
+**前提与限制**：`SharedArrayBuffer` 要求跨源隔离，而跨源隔离又要求页面先在安全上下文里——`https://` 或本机 `http://localhost` / `127.0.0.1`，`http://公网域名` 直接出局。`serve.py` 已经带 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`，用别的服务器要自己加，否则页面会直说拿不到 `SharedArrayBuffer`，并把到底缺哪一层（非安全上下文 / 缺头 / 浏览器没有这个对象）写在同一行里。行号可信的前提是 `-O0`，调试构建不接受优化档位；STL 头文件里的实现不插桩，所以单步进不了 `std::sort` 内部；这套行号来自 IR 元数据而不是 DWARF 的 `.debug_line`，够教学演示，但别按 gdb 的语义期待它。
 
 ## 工作原理
 
@@ -127,13 +130,69 @@ cpp-wasm-playground/
 
 文件系统是一个空的内存 FS，程序跑起来时里面没有任何文件，`std::filesystem`、`fopen` 读外部数据基本无从谈起。
 
-`std::thread` / `<execution>` 需要 SharedArrayBuffer 加跨源隔离（COOP/COEP）。从 `serve.py` 打开就是隔离的（单步调试也依赖这一条），换成别的服务器要自己补那两个头，否则多线程和调试都用不了；单线程程序不受影响。
+`std::thread` / `<execution>` 需要 SharedArrayBuffer 加跨源隔离（https 或 localhost + COOP/COEP，见「部署建议」）。从 `serve.py` 打开就是隔离的（单步调试也依赖这一条），换成别的服务器要自己补那两个头，否则多线程和调试都用不了；单线程程序不受影响。话虽如此，这份 sysroot 没有链 pthread，并发头也不在万能头清单里——真调多线程多半停在链接期未定义符号或运行期 trap。
 
 超时靠终止 Worker 实现，能可靠杀掉死循环，但拿不到精确 CPU 时间，也不区分 CPU 时间和挂钟时间。wasm 线性内存只能增长不能收缩，宿主侧无法给它设上限——超内存会以 `memory access out of bounds` 报出来，而不是 MLE。`system()`、`fork()`、管道这类进程 API 在 WASI 预览版里不存在。
 
 所以：**这个可以当教学、写码验证、面试手撕、离线 playground 用，不能当 OJ 判题后端**。判题要的是精确内存计量、进程级隔离、可对齐 g++ 的诊断信息，这些只有服务端真装一个 g++ 才给得了。
 
 ## 部署建议
+
+### 一、先上 https，再加 COOP/COEP
+
+单步调试依赖 `SharedArrayBuffer`，而它存在的条件是**两个都得满足**：
+
+1. 页面处在安全上下文——`https://` 任意域名，或 `http://localhost` / `http://127.0.0.1`；
+2. 文档响应带 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`，让浏览器算出 `crossOriginIsolated === true`。
+
+`http://公网域名` 属于第 1 条就不合格：这种情况下 COOP/COEP 加得再齐，`SharedArrayBuffer` 也依然是 `undefined`，页面点「编译并调试」只会报缺 SAB。这不是页面的检查太严，是浏览器根本不发这个对象——所以别去改源码跳过检测，跳过之后下一行建控制块照样失败。判断依据：控制台里敲 `self.isSecureContext` 和 `self.crossOriginIsolated`，两个都 `true` 才有的调；只有前者真，就是头没生效（nginx 的 `add_header` **不继承**：某个 `location` 一旦自己写了 `add_header`，上层那两个头就不再落到这个响应上，要么在每个 `location` 重复写，要么用 `include` 片段）。
+
+一份能直接用的 nginx 片段（证书按各自情况签，Let's Encrypt 的 certbot 一条命令就够）：
+
+```nginx
+# 让两个隔离头能被多个 location 复用：写成片段文件，例如 /etc/nginx/snippets/coop-coep.conf
+# add_header Cross-Origin-Opener-Policy "same-origin" always;
+# add_header Cross-Origin-Embedder-Policy "require-corp" always;
+
+server {
+    listen 80;
+    server_name cpp.example.com;
+    return 301 https://$host$request_uri;      # http 一律跳 https
+}
+
+server {
+    listen 443 ssl http2;
+    server_name cpp.example.com;
+    root /var/www/cpp-wasm-playground;
+    ssl_certificate     /etc/letsencrypt/live/cpp.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cpp.example.com/privkey.pem;
+
+    types { application/wasm wasm; }           # 新版 nginx 的 mime.types 已带，旧版（1.20 及更早）要自己加
+
+    location / {
+        try_files $uri $uri/ =404;
+        include /etc/nginx/snippets/coop-coep.conf;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # 工具链是无版本的静态文件，长缓存打满；这个 location 自己写了 add_header，
+    # 所以隔离头必须在这里再 include 一次，否则文档以外的响应就没了。
+    location /assets/ {
+        include /etc/nginx/snippets/coop-coep.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+    location /vendor/ {
+        include /etc/nginx/snippets/coop-coep.conf;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+}
+```
+
+`always` 别省：不带它时 `add_header` 只作用于 2xx/3xx/4xx 里的一部分状态码，出错页反而没有隔离头。改完配置要**硬刷新**（甚至清一次站点数据），文档响应会被缓存，旧的那份没头就等于没改。
+
+如果以后把 `assets/` 挪到 CDN 或 OSS（另一个域名），`require-corp` 会连这些子资源一起拦：那边必须回 `Cross-Origin-Resource-Policy: cross-origin`（跨源 `fetch` 还要 `Access-Control-Allow-Origin`），否则要么退回同域，要么把页面的 COEP 换成 `credentialless`（Chrome/Edge 支持，Firefox 不支持，此时调试照样不可用，普通编译运行不受影响）。
+
+### 二、把 60 MB 压下去
 
 60 MB 原文直接发出去太重。实测 `gzip -9`：
 

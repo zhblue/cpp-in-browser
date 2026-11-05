@@ -90,8 +90,14 @@ self.onmessage = async (ev) => {
   try {
     const memfs = new WasmClang.MemFS({
       compileStreaming: async () => {
-        const r = await fetch(m.base + 'memfs.wasm');
-        if (!r.ok) throw new Error(`HTTP ${r.status} 读取 memfs.wasm 失败`);
+        const url = m.base + 'memfs.wasm';
+        let r;
+        try {
+          r = await fetch(url);
+        } catch (e) {
+          throw new Error(`memfs.wasm 请求没完成（${url}）：${e.name}: ${e.message}`);
+        }
+        if (!r.ok) throw new Error(`memfs.wasm 取不到（HTTP ${r.status} ${r.statusText || ''}，${url}）`);
         return await WebAssembly.compile(await r.arrayBuffer());
       },
       hostWrite: (bytes) => postMessage({ type: 'write', bytes: bytes }, [bytes.buffer]),
