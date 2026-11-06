@@ -13,7 +13,8 @@ importScripts('wasmclang.js', 'dbgproto.js');
 /* 行桩的宿主实现。放在闭包里，避免每次调用都重新取常量。 */
 function makeTracer(c) {
   const S = DBG.S, MODE = DBG.MODE, STATE = DBG.STATE, REASON = DBG.REASON;
-  const ctl = c.ctl, bp = c.bp;
+  const MAXL = DBG.MAX_LINE;
+  const ctl = c.ctl, bp = c.bp, heat = c.heat;
   let hits = 0;
   let debtUs = 0;
 
@@ -45,9 +46,13 @@ function makeTracer(c) {
     ctl[S.LINE] = line;
     hits = (hits + 1) | 0;
     ctl[S.EVENTS] = hits;
+    /* 每行执行次数：热力背景的原料。这里用普通自增而不是 Atomics.add —— 这一格
+       只有 worker 写、主线程只读（跟 ctl[S.LINE] 一个待遇），不存在丢更新；
+       省下的是一次原子操作，全速档每行都要走这里。 */
+    if (line >= 0 && line <= MAXL) heat[line] = (heat[line] + 1) | 0;
 
     const mode = Atomics.load(ctl, S.MODE);
-    const hit = line >= 0 && line <= DBG.MAX_LINE && bp[line] === 1;
+    const hit = line >= 0 && line <= MAXL && bp[line] === 1;
     if (mode === MODE.PAUSE || mode === MODE.STEP || hit) {
       Atomics.store(ctl, S.REASON,
         hit ? REASON.BP : (mode === MODE.STEP ? REASON.STEP : REASON.PAUSE));

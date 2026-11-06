@@ -10,6 +10,10 @@
     --fg: #d7dce6; --dim: #8b95a8; --acc: #6ea8fe; --ok: #5ec97a; --warn: #e6a648; --err: #f2777a;
     --out-bg: #101216; --out-fg: #cdd6e6; --dbgbar-bg: #1a2030; --btn-fg: #10131a;
     --shadow: rgba(0, 0, 0, .45);
+    /* 热力背景的红：用饱和度高的深红而不是 --err 那种浅粉。同样 .30 的透明度，
+       深红抬不起底色，正文（one_dark 的 #abb2be）对比度还有 4.9:1，
+       换成 --err 就掉到 3.8:1，看着费眼。 */
+    --heat-rgb: 216, 46, 46;
   }
   /* 白天配色：只覆盖这一组变量，其余规则全走 var()，切换即整体换色。
      代码编辑器（Ace）的主题由 main.js 跟着换：夜晚 one_dark / 白天 tomorrow。 */
@@ -18,6 +22,9 @@
     --fg: #1f2530; --dim: #5b6675; --acc: #2f6fed; --ok: #177a3d; --warn: #946200; --err: #c0393f;
     --out-bg: #fbfcfe; --out-fg: #222a34; --dbgbar-bg: #eaeef4; --btn-fg: #ffffff;
     --shadow: rgba(20, 30, 50, .18);
+    /* 白底要更亮一点的红才看得出层次；tomorrow 的正文是 #4d4d4c，
+       到 .30 透明度时底色是 #f6cdca 一带，对比度还有约 5.6:1。 */
+    --heat-rgb: 226, 60, 46;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -60,6 +67,10 @@
   }
   button.secondary { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); font-weight: 500; }
   button.danger { background: var(--err); color: #17110f; }
+  /* 「编译并调试」用绿色实心：和「编译并运行」的蓝、「停止」的红分开，
+     投影到屏幕上时一眼能认出哪个按钮进调试。文字仍走 --btn-fg，
+     所以白天（深绿 #177a3d + 白字）和夜晚（浅绿 #5ec97a + 深字）都是高对比。 */
+  button.go { background: var(--ok); color: var(--btn-fg); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button:hover:not(:disabled) { filter: brightness(1.1); }
   .grow { flex: 1; }
@@ -155,6 +166,42 @@
     background-image: radial-gradient(circle at 7px 50%, var(--err) 3.2px, transparent 3.6px);
     cursor: pointer;
   }
+
+  /* ---------- 每行执行次数的热力背景 ----------
+     次数由 worker 在共享内存里逐行累加（js/dbgproto.js 的 heat 段），主线程按
+     log2 分 9 档涂红：1 次、2~3、4~7、8~15、16~31、32~63、64~127、128~255、≥256。
+     取对数是必须的——冒泡内层一行跑几千次，线性映射的话除了最里面那一两行全是纯红，
+     外层循环和只走一次的初始化行分不出层次。
+     封顶在 alpha .30：字永远比底色对比不足才叫「读不动」，深红到 .30 时正文对比度
+     还有约 4.9:1，再往上就只是把整屏染成砖红了。z-index 比当前行高亮（4）低一层，
+     所以停在哪一行仍然看得清。
+     position:absolute 那一条的道理见本文件上面「Ace 上的调试标记」的注释。 */
+  .ace_marker-layer .heat1, .ace_marker-layer .heat2, .ace_marker-layer .heat3,
+  .ace_marker-layer .heat4, .ace_marker-layer .heat5, .ace_marker-layer .heat6,
+  .ace_marker-layer .heat7, .ace_marker-layer .heat8, .ace_marker-layer .heat9 {
+    position: absolute; left: 0; right: 0; z-index: 1;
+  }
+  .ace_marker-layer .heat1 { background: rgba(var(--heat-rgb), .05); }
+  .ace_marker-layer .heat2 { background: rgba(var(--heat-rgb), .08); }
+  .ace_marker-layer .heat3 { background: rgba(var(--heat-rgb), .12); }
+  .ace_marker-layer .heat4 { background: rgba(var(--heat-rgb), .16); }
+  .ace_marker-layer .heat5 { background: rgba(var(--heat-rgb), .20); }
+  .ace_marker-layer .heat6 { background: rgba(var(--heat-rgb), .24); }
+  .ace_marker-layer .heat7 { background: rgba(var(--heat-rgb), .27); }
+  .ace_marker-layer .heat8 { background: rgba(var(--heat-rgb), .29); }
+  .ace_marker-layer .heat9 { background: rgba(var(--heat-rgb), .30); }
+
+  /* 热力层自己的状态条：会话结束后仍然显示（红色要留着看），改源码 / 重开会话 /
+     按「清除」时收起来。 */
+  .heatbar {
+    display: none; flex: none; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: 0 0 4px; font-size: 11px; color: var(--dim);
+  }
+  .heatbar.on { display: flex; }
+  .heatbar .lab { color: var(--fg); font-weight: 600; }
+  .heatbar .scale { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
+  .heatbar .scale i { width: 13px; height: 9px; background: rgba(var(--heat-rgb), var(--a)); }
+  .heatbar #heatinfo { font-variant-numeric: tabular-nums; }
   /* 停行时悬停在变量名上弹出的值 */
   .vartip {
     position: fixed; z-index: 30; pointer-events: none;
@@ -239,7 +286,7 @@
   <div class="grow"></div>
   <div class="btns">
     <button id="run">编译并运行</button>
-    <button id="debug" class="secondary">编译并调试</button>
+    <button id="debug" class="go">编译并调试</button>
     <button id="stop" class="danger" disabled>停止</button>
     <button id="reload" class="secondary">重载工具链</button>
   </div>
@@ -252,12 +299,22 @@
   <button id="dbg-quit" class="danger">退出调试</button>
   <div class="state" id="dbgstate">—</div>
   <div class="grow"></div>
-  <div class="hint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选</div>
+  <div class="hint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选。每执行一行源码，左边那栏的「热力」就把这一行的背景加红一档（按次数取 log2，最重只到不吃字的程度），退出调试后红色保留着，用来找程序里最值得优化的位置；没停住时把鼠标放到红行上能看到确切次数</div>
 </div>
 
 <main>
   <div class="pane">
     <div class="cap"><span>源代码 main.cc（Ctrl+Enter 运行）</span><span id="srclen"></span></div>
+    <div class="heatbar" id="heatbar"
+         title="调试运行时按「这一行被执行了多少次」把行背景涂红，越频繁越红。深浅按 log2 分档：1 次最浅，2~3、4~7、8~15、16~31、32~63、64~127、128~255 递增，256 次以上同用最深的红——封顶是为了别让字读不动。次数由每个行桩真实触发累加，不是采样估算。退出调试后红色保留着，方便找热点；改一下源码、重开一次调试，或按这里的「清除」就撤掉。">
+      <span class="lab">热力</span>
+      <span class="scale" aria-hidden="true">
+        <i style="--a:.05"></i><i style="--a:.08"></i><i style="--a:.12"></i><i style="--a:.16"></i><i style="--a:.20"></i><i style="--a:.24"></i><i style="--a:.27"></i><i style="--a:.29"></i><i style="--a:.30"></i>
+      </span>
+      <span id="heatinfo"></span>
+      <span class="grow"></span>
+      <button id="heat-clear" class="mini secondary">清除</button>
+    </div>
     <div id="editor"></div>
   </div>
 

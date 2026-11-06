@@ -1337,26 +1337,41 @@ const dbg = {
   marker: null, markerRow: -1, markerCls: '',
   timer: 0, lastLine: -1, lastParked: null,
   active: false,
+  /* 热力背景：次数在 worker 侧的 heat 表里，这里只缓存「画成第几档」，
+     避免每个 tick 都把同一档的 marker 删了重建。 */
+  heatMarks: new Map(), heatLv: new Map(), heatN: new Map(),
+  heatRows: null, heatMax: { n: 0, line: 0 }, heatTick: 0,
 };
 
 function dbgSupported() { return typeof SharedArrayBuffer !== 'undefined'; }
 
-/* 拿不到 SharedArrayBuffer 时，把到底缺哪一层说清楚。三个条件是串联的：
-   安全上下文 → COOP/COEP → crossOriginIsolated → SAB。旧文案只提第二个，
-   结果 http 公网域名下照着加头，加完还是不行 —— 非安全上下文里 SAB 压根
-   不存在，加什么头都没用，这一步必须先看 isSecureContext。 */
+/* 拿不到 SharedArrayBuffer 时，把到底缺哪一层说清楚。链条是：
+   安全上下文 → COOP/COEP → crossOriginIsolated → SAB。
+   最容易说错的是最后一步：https 到位、头没到位的时候，Firefox 和 Safari 直接
+   不发 SAB 这个对象，此时 typeof SharedArrayBuffer === 'undefined' 看着像
+   「浏览器太旧」，其实跟版本一点关系没有；Chrome 系反过来，非隔离上下文里照样
+   给 SAB，但 Atomics.wait 会被拒，调试一样停不住。所以判因先看
+   crossOriginIsolated，再看 SAB 在不在，别把缺响应头报成缺浏览器。 */
 function sabMissing() {
-  if (typeof SharedArrayBuffer !== 'undefined' && self.crossOriginIsolated) return '';
+  const hasSAB = typeof SharedArrayBuffer !== 'undefined';
+  if (hasSAB && self.crossOriginIsolated) return '';
   if (!self.isSecureContext)
     return `当前不是安全上下文（${location.protocol}//${location.host}）：` +
       'SharedArrayBuffer 只在 https、或 http://localhost / 127.0.0.1 下才存在，' +
       '光加 COOP/COEP 响应头没用，先把站点切到 https（或本地用 serve.py 打开）';
-  if (typeof SharedArrayBuffer === 'undefined')
-    return '这个浏览器里没有 SharedArrayBuffer（版本太旧，或被隐私/企业策略关掉了）';
-  return '安全上下文没问题，但页面没拿到跨源隔离：文档响应里缺 ' +
-    'Cross-Origin-Opener-Policy: same-origin 或 Cross-Origin-Embedder-Policy: require-corp。' +
-    'nginx 的坑是 add_header 不继承 —— 某个 location 一旦自己写了 add_header，' +
-    '上层那两个头就不再落到这个响应上，补完记得硬刷新（旧文档响应会被缓存）';
+  if (!self.crossOriginIsolated)
+    return '站点已经是 https，但页面没拿到跨源隔离：文档响应里缺 ' +
+      'Cross-Origin-Opener-Policy: same-origin 或 Cross-Origin-Embedder-Policy: require-corp。' +
+      (hasSAB
+        ? '这个浏览器在非隔离上下文里仍然给了 SharedArrayBuffer，但 Atomics.wait 会被拒绝，调试照样停不住。'
+        : '这个浏览器在非隔离上下文里不提供 SharedArrayBuffer，所以看着像「没有这个对象」，跟版本新旧无关。') +
+      'nginx 有两个坑：add_header 不继承（某个 location 一旦自己写了 add_header，' +
+      '上层那两个头就不再落到这个响应上，要么每个 location 重复写，要么 include 一个片段）；' +
+      '要带 always，改完还得硬刷新，旧的文档响应有缓存。' +
+      '如果这个页面是被 iframe 嵌在别的站点里用的，父页面也得带同样两个头，祖先链上断一环就不隔离。' +
+      `自查：控制台看 self.isSecureContext 和 self.crossOriginIsolated（当前分别是 ${self.isSecureContext} 和 ${self.crossOriginIsolated}），` +
+      '或者 curl -I 这个页面，看响应头里有没有那两行';
+  return '跨源隔离已经生效，但这个浏览器里没有 SharedArrayBuffer：多半是企业策略或隐私设置把它关掉了';
 }
 
 function dbgCmd(mode) {
@@ -1446,6 +1461,92 @@ function dbgMarkLine(line, parked) {
   dbgSyncMarkers();
 }
 
+/* ------------------------------------------------------------------ */
+/* 每行执行次数 → 热力背景                                              */
+/*                                                                    */
+/* 计数在 worker 侧（共享内存的 heat[行号]，见 dbgproto.js），不是主线程 */
+/* 攒的：dbgTick 50 ms 才读一次当前行，全速档两次轮询之间早就跨过几千行， */
+/* 采样数出来的是「这行被看见过几次」，跟真正的执行次数差着好几个数量级。 */
+/* 深浅按 log2 分档、第 9 档封顶，是因为冒泡内层动辄上万次：线性映射的   */
+/* 话除了最里面那两行全是纯红，外层循环和只做一次的初始化行分不出层次；   */
+/* 取对数后 1 次、2~3、4~7、…、≥256 各占一档，红度上限锁在不吃掉字的     */
+/* 那一档（.heat9 的 alpha 见 index.html）。                            */
+/* ------------------------------------------------------------------ */
+const HEAT_LEVELS = 9;
+const HEAT_SEL = Array.from({ length: HEAT_LEVELS },
+  (_, i) => `.ace_marker-layer .heat${i + 1}`).join(', ');
+
+/* 次数 → 档次：1→1，2~3→2，4~7→3，…，≥256→9（封顶） */
+function heatBucket(n) {
+  let b = 1;
+  while (b < HEAT_LEVELS && n >= (1 << b)) b++;
+  return b;
+}
+
+/* 会话结束后给状态栏补一句：热力层还在编辑器上，顺手把最热的那行报出来。 */
+function heatSummary() {
+  if (!dbg.heatMarks.size) return '';
+  return ` · 热力 ${dbg.heatMarks.size} 行，最热第 ${dbg.heatMax.line} 行 × ${dbg.heatMax.n.toLocaleString('en-US')} 次`;
+}
+
+function updateHeatBar() {
+  const bar = $('heatbar');
+  if (!bar) return;
+  if (!dbg.heatMarks.size) { bar.classList.remove('on'); return; }
+  bar.classList.add('on');
+  $('heatinfo').textContent =
+    `已标 ${dbg.heatMarks.size} 行，最热第 ${dbg.heatMax.line} 行 × ${dbg.heatMax.n.toLocaleString('en-US')} 次`;
+}
+
+/* 把 heat[] 里的次数刷成行背景。只动「档次变了」的那几行：addMarker/removeMarker
+   会让 Ace 重画整个 marker 层，每个 tick 全量重建的话画面会跟着抖。 */
+function paintHeat() {
+  const heat = dbg.cb && dbg.cb.heat;
+  if (!heat || !dbg.heatRows) return;
+  const sess = srcEditor.session;
+  const rows = sess.getLength();
+  let changed = false;
+  for (const line of dbg.heatRows) {
+    if (line < 1 || line > DBG.MAX_LINE) continue;
+    const n = heat[line];
+    if (n > dbg.heatMax.n) dbg.heatMax = { n: n, line: line };
+    if (!n) continue;
+    const row = line - 1;
+    if (row >= rows) continue;
+    /* 次数每次都存（悬停框要报准确数字），marker 只在档次跨档时才重画 */
+    if (dbg.heatN.get(row) !== n) dbg.heatN.set(row, n);
+    const b = heatBucket(n);
+    if (dbg.heatLv.get(row) === b) continue;
+    const old = dbg.heatMarks.get(row);
+    if (old) sess.removeMarker(old);
+    dbg.heatMarks.set(row, sess.addMarker(new Range(row, 0, row, 1), 'heat' + b, 'screenLine', false));
+    dbg.heatLv.set(row, b);
+    changed = true;
+  }
+  if (changed) dbgSyncMarkers();
+  /* 状态条每次都刷：heatMax 会在一档之内继续往上走（128~255 都算第 8 档），
+     只跨档才刷的话「最热 ×N 次」会停在旧数字上。 */
+  updateHeatBar();
+}
+
+/* 清掉热力层：换源码、重开一次调试会话，或者手动按「清除」。
+   会话结束时不调它 —— 保留最终的红色分布正是这个功能的目的。 */
+function clearHeat() {
+  const sess = srcEditor.session;
+  for (const m of dbg.heatMarks.values()) sess.removeMarker(m);
+  dbg.heatMarks.clear(); dbg.heatLv.clear(); dbg.heatN.clear();
+  dbg.heatMax = { n: 0, line: 0 };
+  hideVarTip();     /* 悬停框里可能正挂着某一行的次数，层都撤了就不能再留着 */
+  dbgSyncMarkers();
+  const ds = srcEditor.container.querySelectorAll(HEAT_SEL);
+  for (const d of ds) d.remove();
+  updateHeatBar();
+}
+
+/* 行号对应的是编译进去的那份源码；改一个字热力层就不再可信了，直接撤掉。
+   （会话中编辑器是只读的，所以这里不会跟插桩过程抢着改 marker。） */
+srcEditor.session.on('change', () => { if (dbg.heatMarks.size) clearHeat(); });
+
 function dbgTick() {
   if (!dbg.ctl) return;
   const c = dbg.ctl;
@@ -1474,6 +1575,11 @@ function dbgTick() {
     ? `停在第 ${line} 行（${REASON_TEXT[c[DBG.S.REASON]] || '已停'}）· 行桩触发 ${hits.toLocaleString('en-US')} 次`
     : `运行中 · 第 ${line} 行 · 行桩触发 ${hits.toLocaleString('en-US')} 次`;
   if (!parked) hideVarTip();
+  /* 热力背景：跑动时 200 ms 刷一次就够（看的是趋势，不是逐帧动画）；停住时每趟
+     都刷，手工单步绕一圈能看着当前行一档一档变红。没档次变化时 paintHeat 自己会
+     提前返回，不碰 marker 层。 */
+  if (parked) paintHeat();
+  else if (++dbg.heatTick >= 4) { dbg.heatTick = 0; paintHeat(); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1529,13 +1635,20 @@ function fmtVar(v, lo, hi) {
   return s;
 }
 
-/* 停在某行时能看到的变量：名字 -> 变量描述（同一行重名取第一个） */
+/* 停在某行时能看到的变量：名字 -> 变量描述。
+   同名要挑对的那个：一个函数里写两个 for (int i...) 就是两个 alloca、两个 id，
+   插桩按函数收集快照名单，所以外面那个已经出了作用域也照样挂在当前行的名单上。
+   取「先出现的」会读到死变量的旧值（实测冒泡用例里停在第 25 行，输入打印那趟的
+   i 停在 30，把真正的循环变量 i=0 盖掉了），所以按声明行比大：离当前行最近的那次
+   声明就是当前作用域里活着的那个，把早先的同名顶掉。 */
 function liveVarsAt(line) {
   const map = new Map();
   const ids = (dbg.lineVars && dbg.lineVars[String(line)]) || [];
   for (const id of ids) {
     const v = dbg.vars && dbg.vars[id];
-    if (v && !map.has(v.name)) map.set(v.name, v);
+    if (!v) continue;
+    const prev = map.get(v.name);
+    if (!prev || (v.line || 0) >= (prev.line || 0)) map.set(v.name, v);
   }
   return map;
 }
@@ -1552,12 +1665,37 @@ function varTipText(name, v, line) {
   return `${head} = ${fmtVar(v, lo, hi)}${note}`;
 }
 
+/* 悬浮框只有一个（.vartip）：停住时显示变量值，其余时候显示这行的执行次数。 */
+function showTip(text, ev) {
+  varTipEl.textContent = text;
+  varTipEl.style.display = 'block';
+  const w = varTipEl.offsetWidth, h = varTipEl.offsetHeight;
+  varTipEl.style.left = Math.min(ev.clientX + 14, innerWidth - w - 8) + 'px';
+  varTipEl.style.top = (ev.clientY + 16 + h > innerHeight ? ev.clientY - h - 8 : ev.clientY + 16) + 'px';
+}
+
+/* 没停住时悬停报这一行的执行次数：找热点的人要的正是这个数。
+   取的是最后一次 paintHeat 存下的快照，会话结束后那就是终值。 */
+function heatTipAt(ev) {
+  if (!dbg.heatN.size) return false;
+  let row = -1;
+  try {
+    row = srcEditor.renderer.screenToTextCoordinates(ev.clientX, ev.clientY).row;
+  } catch (e) { return false; }
+  const n = dbg.heatN.get(row);
+  if (!n) return false;
+  showTip(`第 ${row + 1} 行执行 ${n.toLocaleString('en-US')} 次（热力第 ${dbg.heatLv.get(row)}/${HEAT_LEVELS} 档）`, ev);
+  return true;
+}
+
 /* 悬停查变量。注意不能用 e.target 是不是 .ace_identifier 的 span 来判断：
    Ace 的 .ace_layer 整层 pointer-events: none（它自己的 CSS 里写了，为了 Safari
    滚轮不被打断），真实鼠标事件的 target 永远是 div.ace_content，压根拿不到 span。
-   所以走坐标反查：clientX/Y -> 文档行列 -> 该位置的 token。 */
+   所以走坐标反查：clientX/Y -> 文档行列 -> 该位置的 token。
+   变量值只在「停住」时给（那时内存是静止的）；没停住就退一步报热力次数。 */
 srcEditor.container.addEventListener('mousemove', (ev) => {
   if (!(dbg.active && dbg.ctl) || Atomics.load(dbg.ctl, DBG.S.STATE) !== DBG.STATE.PARK) {
+    if (heatTipAt(ev)) return;
     hideVarTip();
     return;
   }
@@ -1569,15 +1707,11 @@ srcEditor.container.addEventListener('mousemove', (ev) => {
       name = tok.value;
     }
   } catch (e) { name = ''; }
-  if (!name) { hideVarTip(); return; }
+  if (!name) { if (!heatTipAt(ev)) hideVarTip(); return; }
   const line = dbg.ctl[DBG.S.LINE];
   const v = liveVarsAt(line).get(name);
-  if (!v) { hideVarTip(); return; }
-  varTipEl.textContent = varTipText(name, v, line);
-  varTipEl.style.display = 'block';
-  const w = varTipEl.offsetWidth, h = varTipEl.offsetHeight;
-  varTipEl.style.left = Math.min(ev.clientX + 14, innerWidth - w - 8) + 'px';
-  varTipEl.style.top = (ev.clientY + 16 + h > innerHeight ? ev.clientY - h - 8 : ev.clientY + 16) + 'px';
+  if (!v) { if (!heatTipAt(ev)) hideVarTip(); return; }
+  showTip(varTipText(name, v, line), ev);
 });
 srcEditor.container.addEventListener('mouseleave', hideVarTip);
 
@@ -1594,6 +1728,10 @@ function dbgQuit() {
   if (dbg.timer) clearInterval(dbg.timer);
   dbg.timer = 0;
   hideVarTip();
+  /* 退场前补一次热力：dbgTick 最快也要 50 ms 后才跑，最后那几行的次数不能丢。
+     注意这里只清「当前行」那层高亮，热力层要留着给人找热点，
+     它由改源码 / 重开会话 / 手动清除三个入口撤掉。 */
+  paintHeat();
   if (dbg.marker !== null && dbg.ctl) srcEditor.session.removeMarker(dbg.marker);
   dbgGutterMark(0, '');
   dbg.marker = null; dbg.markerRow = -1; dbg.markerCls = '';
@@ -1616,6 +1754,11 @@ async function startDebugSession(built) {
   dbg.cb = cb; dbg.ctl = cb.ctl; dbg.bp = cb.bp; dbg.lines = lines;
   dbg.vars = built.vars || [];
   dbg.lineVars = built.lineVars || {};
+  /* 新会话从空热力开始：上一轮的次数留在旧控制块里，行号却是按旧源码编的，
+     混着画会指错热点。heat 是新建 SAB 上的一块，天生全 0，不用清。 */
+  dbg.heatRows = lines;
+  dbg.heatTick = 0;
+  clearHeat();
   dbg.ctl[DBG.S.DELAY_US] = parseInt(dbgSpeed.value, 10) || 0;
   Atomics.store(dbg.ctl, DBG.S.MODE, DBG.MODE.RUN);
   Atomics.store(dbg.ctl, DBG.S.STATE, DBG.STATE.EXEC);
@@ -1642,8 +1785,13 @@ async function startDebugSession(built) {
   dbg.timer = 0;
 
   /* 调试没有超时，所以「停止 / 退出调试」是结束会话的正常出口：灯要收回中性，
-     不能继续闪「运行中」，看着像程序还在跑。 */
-  if (r.aborted) { setDot(''); say('调试已结束', 'warn'); dbgQuit(); return; }
+     不能继续闪「运行中」，看着像程序还在跑。
+     dbgQuit 里会补最后一次 paintHeat，热力层留在编辑器上，所以先收尾再报数。 */
+  /* 「最后一站」按控制块里的 LINE 报：那是 worker 写的最后一个行桩，比 50 ms 轮询
+     采到的 dbg.lastLine 准（全速档常常只采到跑到一半的行号，甚至一次都没采到）。
+     LINE 为 0 说明一个行桩都没触发（main 之前就 trap 了），退回采样值。 */
+  const last = (cb.ctl[DBG.S.LINE] | 0) || (dbg.lastLine > 0 ? dbg.lastLine : 0);
+  if (r.aborted) { setDot(''); dbgQuit(); say('调试已结束' + heatSummary(), 'warn'); return; }
   /* worker 里测的 r.ms 把「停在某行等人放行」和「降速睡过去」的时间也算进去了。
      那不是程序在跑，是人在看，报成运行时间会离谱到几十秒。 */
   const parked = Atomics.load(cb.ctl, DBG.S.PARKED_MS);
@@ -1656,9 +1804,9 @@ async function startDebugSession(built) {
   metric('exit', r.code, r.code === 0 ? 'ok' : 'err');
   metric('run', netMs + ' ms', r.code === 0 ? '' : 'err', tip);
   if (r.memoryBytes) metric('mem', (r.memoryBytes / 1048576).toFixed(1) + ' MB');
-  say(r.note ? '运行出错：' + r.note : `程序结束（第 ${dbg.lastLine > 0 ? dbg.lastLine : '—'} 行是最后一站）`,
-      r.code === 0 ? 'ok' : 'err');
   dbgQuit();
+  say((r.note ? '运行出错：' + r.note : `程序结束（第 ${last > 0 ? last : '—'} 行是最后一站）`) + heatSummary(),
+      r.code === 0 ? 'ok' : 'err');
 }
 
 async function doDebug() {
@@ -1812,6 +1960,7 @@ $('dbg-cont').onclick = () => dbgCmd(DBG.MODE.RUN);
 $('dbg-step').onclick = () => dbgCmd(DBG.MODE.STEP);
 $('dbg-pause').onclick = dbgPause;
 $('dbg-quit').onclick = () => { dbgStopRun(); dbgQuit(); };
+$('heat-clear').onclick = clearHeat;
 dbgSpeed.onchange = () => {
   if (dbg.ctl) dbg.ctl[DBG.S.DELAY_US] = parseInt(dbgSpeed.value, 10) || 0;
 };

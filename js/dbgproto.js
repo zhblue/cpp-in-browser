@@ -10,11 +10,14 @@
  *   如果主线程在 worker 进入 wait 之前就已经写了 GO，worker 的 wait 会因为
  *   期望值不相等立刻返回，循环重新判定后直接往下走。
  *
- * 三段数据的用途：
+ * 五段数据的用途：
  *   ctl  10 个控制槽（模式、状态、当前行、停住原因、行桩计数、降速时长、耗时统计）
  *   bp   断点表，下标 = 源码行号，1 = 有断点；主线程写，worker 每行读一次
  *   val  变量值表，每个变量占两个 int32（低 32 位、高 32 位），worker 每行刷新
  *   wr   变量值有效性标记，0 = 这个变量的槽还没被写过（本行才声明 / 分支没走到）
+ *   heat 每行执行次数，下标 = 源码行号；worker 每触发一个行桩加一，主线程只读，
+ *        拿它算「热力背景」的深浅。计数必须在 worker 侧累加：主线程是 50 ms 轮询
+ *        一次当前行，全速跑时两次轮询之间早就跨过几千行，采样数出来的是假数。
  *
  * val/wr 的下标是插桩时分配的变量 id，由 compile.worker 随产物一起交给主线程，
  * 两边用的是同一份 instrumentIR 生成的表。
@@ -48,7 +51,8 @@
     BP: HDR,
     VAL: HDR + MAX_LINE + 1,
     WR: HDR + MAX_LINE + 1 + MAX_VAR * 2,
-    END: HDR + MAX_LINE + 1 + MAX_VAR * 3,
+    HEAT: HDR + MAX_LINE + 1 + MAX_VAR * 3,
+    END: HDR + MAX_LINE + 1 + MAX_VAR * 3 + MAX_LINE + 1,
   };
 
   function views(sab) {
@@ -61,6 +65,7 @@
       bp: new Int32Array(sab, AT.BP * 4, MAX_LINE + 1),
       val: new Int32Array(sab, AT.VAL * 4, MAX_VAR * 2),
       wr: new Int32Array(sab, AT.WR * 4, MAX_VAR),
+      heat: new Int32Array(sab, AT.HEAT * 4, MAX_LINE + 1),
     };
   }
 
@@ -77,7 +82,7 @@
   function attachControlBlock(sab) {
     const v = views(sab);
     return {
-      sab: v.sab, ctl: v.ctl, bp: v.bp, val: v.val, wr: v.wr,
+      sab: v.sab, ctl: v.ctl, bp: v.bp, val: v.val, wr: v.wr, heat: v.heat,
       S: S, MODE: MODE, STATE: STATE, REASON: REASON, MAX_VAR: MAX_VAR,
     };
   }

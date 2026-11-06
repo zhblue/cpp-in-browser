@@ -33,6 +33,7 @@ python3 serve.py 8765
 | 编译并运行 | `Ctrl+Enter`（macOS `Cmd+Enter`） |
 | 编译并调试 | `Ctrl+Shift+Enter`（macOS `Cmd+Shift+Enter`），见下面「单步调试」一节 |
 | 停止 | `Ctrl+.` 或 `Esc` |
+| 热力状态条 | 只在跑过一次「编译并调试」后出现，位于源码编辑器上方：色阶图例 + 「已标 N 行，最热第 X 行 × M 次」+「清除」按钮。见下面「单步调试」一节的热力背景 |
 | 重载工具链 | 清空输出并重建编译 Worker（改了工具链文件时用） |
 | 清空输出 | 输出框右上角的红色小按钮，同时清掉 stdout/stderr 和字符计数 |
 
@@ -60,7 +61,9 @@ python3 serve.py 8765
 
 **画面自动跟着执行行**：编辑器不用手滚。程序**停住**的那一行直接 `gotoLine` 过去，光标一并落到那一行——这样停在当前行上直接悬停变量名就能看值，不必先把画面找回来。全速/降速**跑动**时只在当前行跑出视野才滚，而且只滚画面、不动光标：每行都拽一下的话，人正在看的那段会被顶走。这里两个 API 都挂在 `Editor` 上，不是 `renderer`：`isRowVisible(row)` 内部读 `getFirstVisibleRow()` / `getLastVisibleRow()`，`scrollToLine(row, center, animate)` 收的是 **0 基行号**（它把 row 直接喂给 `$cursorLayer.getPixelPosition`），传 `line - 1`。
 
-**看变量**：程序停住时把鼠标放到源码里的变量名上，浮动框给出 `名字 : 类型 = 值`。覆盖 POD——整型（含 `long long`，按高低位拼回）、浮点、指针（显示线性内存地址）、`bool`、`char`（同时给字符和数值），`int&` 这类引用会多插一次 `load` 显示被引用对象的值。`std::string`、容器、结构体只报名字和类型、不展开内容；可见性按「声明行 ≤ 当前行」判定，所以刚停在声明行上时多半显示"本行声明，可能还没赋值"。快照调用排在行桩之前，因此停在某行看到的是**这一行开始前**的值，符合"这行还没执行"的直觉。
+**看变量**：程序停住时把鼠标放到源码里的变量名上，浮动框给出 `名字 : 类型 = 值`。覆盖 POD——整型（含 `long long`，按高低位拼回）、浮点、指针（显示线性内存地址）、`bool`、`char`（同时给字符和数值），`int&` 这类引用会多插一次 `load` 显示被引用对象的值。`std::string`、容器、结构体只报名字和类型、不展开内容；可见性按「声明行 ≤ 当前行」判定，所以刚停在声明行上时多半显示"本行声明，可能还没赋值"。**同名变量按声明行取最靠近当前行的那个**：一个函数里写两个 `for (int i ...)` 就是两个 alloca、两个 id，插桩的名单是按函数收集的，出了作用域那个照样挂在当前行上；按名单顺序取第一个会读到死变量的旧值（实测冒泡用例停在第 25 行时，输入打印那趟的 `i` 停在 30，把真正的 `i = 0` 盖掉了），所以 `liveVarsAt` 比较声明行、后声明的顶掉先声明的。快照调用排在行桩之前，因此停在某行看到的是**这一行开始前**的值，符合"这行还没执行"的直觉。
+
+**热力背景：每行执行了多少次**：行桩每触发一次，Worker 就在共享内存的 `heat[行号]` 上加一（控制块新增的一段，见 `js/dbgproto.js`）。主线程按次数取 `log2` 分 9 档给这一行涂红：1 次、2~3、4~7、8~15、16~31、32~63、64~127、128~255、≥256 各一档，`index.html` 里 `.heat1`～`.heat9` 的 alpha 从 .05 到 .30。**计数必须在 Worker 侧**：`dbgTick` 是 50 ms 一轮询，全速档两次轮询之间早就跨过几千行，主线程攒出来的是「这行被看见过几次」，跟执行次数差着好几个数量级。**必须封顶**：冒泡内层一行动辄上千次，线性映射的话除了最里面那一两行全是纯红，外层循环和只做一次的初始化行分不出层次；alpha 上限 .30 是量着对比度定的——用的不是 `--err` 那种浅粉而是饱和度高的深红（`--heat-rgb`），同样透明度下抬不起底色，第 9 档时正文对比度还有约 4.9:1（白天配色约 5.6:1）。跑动中 200 ms 刷一次，停住时每个 tick 刷（没跨档就提前返回，不碰 marker 层，免得画面抖）。退出调试后**红色保留**，找热点要看的就是这份终态；三个入口撤掉它：改一下源码（`session.on('change')`，行号已经对不上旧编译了）、重开一次调试（新会话从全 0 开始）、点编辑器上方「热力」状态条里的「清除」。那条状态条同时报「已标 N 行，最热第 X 行 × M 次」，会话结束时的状态栏也带同一句；没停住的时候把鼠标放到红行上，浮动框给出这一行的确切次数和档次（停住时那个位置仍然是变量值优先）。实测手工冒泡用例：第 22 行 450、第 23/24/28 行 425、第 25~27 行 214，和程序自己报的「比较 425 次，交换 214 次」对得上。
 
 **及时看到程序的输出**：程序用 `std::endl` / `std::flush` 写的行本来就会立刻刷出来，但竞赛风格地只写 `"\n"` 时，内容其实压在 libc++ 的 C `stdout` 缓冲里（`sync_with_stdio` 默认开着），要等写满 1 KB 或程序结束才到宿主。调试构建在每个行桩、`__pg_trace` 之前多插一条 `fflush(null)`，所以停在某行、或降速逐行走的时候，前面几行 `cout` 出去的内容已经实时进到了输出框。小坑：这条 `call` 的返回值必须给一个显式非数字名（借用插桩自己的 `tmp` 计数器），裸写匿名 `call i32 @fflush` 会被 LLVM 自动占一个 `%0/%1/…` 编号，跟 clang 原样抄下来的 `%0 = bitcast`、`%1 = load` 撞号，报 "instruction expected to be numbered"；`__pg_trace` 是 `void`，没这问题。（若程序自己 `sync_with_stdio(false)`，`std::cout` 改用 libc++ 内部缓冲，这条 `fflush` 刷不动它——教学用例没人这么写。）
 
@@ -110,11 +113,14 @@ Ace 编辑器 ──源码字节──> compile.worker（常驻）
 cpp-wasm-playground/
 ├── index.html              页面 + 全部样式（单文件，无框架）
 ├── serve.py                本地静态服务器（长缓存 + .wasm MIME）
+├── article/                面向 HUSTOJ 用户的公众号稿：Markdown 原文 + 配图 + build_html.py
+│                           （把稿子转成能直接粘进微信编辑器的 HTML，样式全走行内、
+│                            图片转 data URI，否则粘贴时图片会丢）
 ├── js/
 │   ├── wasmclang.js        工具链驱动层：Toolchain / MemFS / WasiApp / Tar / IR 行插桩与变量表
 │   ├── compile.worker.js   常驻编译 Worker
 │   ├── run.worker.js       一次性运行 Worker
-│   ├── dbgproto.js         调试控制块（SharedArrayBuffer）布局，主线程与 Worker 共用一份定义
+│   ├── dbgproto.js         调试控制块（SharedArrayBuffer）布局：控制槽 / 断点表 / 变量值表 / 每行执行次数，主线程与 Worker 共用一份定义
 │   └── main.js             UI 编排、Ace、指标、快捷键、localStorage
 ├── assets/                 工具链（约 60 MB，见下方致谢）
 │   ├── clang.wasm          31.2 MB
@@ -134,6 +140,8 @@ cpp-wasm-playground/
 
 超时靠终止 Worker 实现，能可靠杀掉死循环，但拿不到精确 CPU 时间，也不区分 CPU 时间和挂钟时间。wasm 线性内存只能增长不能收缩，宿主侧无法给它设上限——超内存会以 `memory access out of bounds` 报出来，而不是 MLE。`system()`、`fork()`、管道这类进程 API 在 WASI 预览版里不存在。
 
+热力背景的口径和单步一样：数的是**行桩触发次数**，只有你自己的代码有行桩——`std::sort`、`std::map` 这些头文件里的实现不插桩，所以一次调用算在调用它那一行上，红的是「这行调了多少次」而不是内部跑了多少步；`-O0` 之外不接受优化档位，优化后循环被切开、行被合并，次数就不再对应源码结构。计数槽是 int32，一行累计到 21 亿次才回绕，教学用例碰不到。
+
 所以：**这个可以当教学、写码验证、面试手撕、离线 playground 用，不能当 OJ 判题后端**。判题要的是精确内存计量、进程级隔离、可对齐 g++ 的诊断信息，这些只有服务端真装一个 g++ 才给得了。
 
 ## 部署建议
@@ -146,6 +154,8 @@ cpp-wasm-playground/
 2. 文档响应带 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`，让浏览器算出 `crossOriginIsolated === true`。
 
 `http://公网域名` 属于第 1 条就不合格：这种情况下 COOP/COEP 加得再齐，`SharedArrayBuffer` 也依然是 `undefined`，页面点「编译并调试」只会报缺 SAB。这不是页面的检查太严，是浏览器根本不发这个对象——所以别去改源码跳过检测，跳过之后下一行建控制块照样失败。判断依据：控制台里敲 `self.isSecureContext` 和 `self.crossOriginIsolated`，两个都 `true` 才有的调；只有前者真，就是头没生效（nginx 的 `add_header` **不继承**：某个 `location` 一旦自己写了 `add_header`，上层那两个头就不再落到这个响应上，要么在每个 `location` 重复写，要么用 `include` 片段）。
+
+第 2 条没满足时，报错文案会随浏览器变，别被它带偏：Firefox 和 Safari 在非隔离上下文里**压根不提供** `SharedArrayBuffer` 这个构造器，于是 `typeof SharedArrayBuffer === 'undefined'`，看着像"浏览器太旧"，其实跟版本无关；Chrome / Edge 相反，非隔离上下文里照样给 SAB，但 `Atomics.wait` 会被拒，调试一样停不住。所以排查顺序是先看 `crossOriginIsolated`，再看 SAB 在不在，`sabMissing()` 按这个顺序分支，并把当前两个布尔值直接印在提示里。还有一个容易漏的场景：页面被 iframe 嵌进别的站点（比如挂进 OJ 的某一页），**祖先链上每一环都得隔离**，父页面不带这两个头，iframe 里的 `crossOriginIsolated` 就是 `false`，本地直开却正常——这种情况要么父页面一起加头，要么把入口改成新标签页直开。
 
 一份能直接用的 nginx 片段（证书按各自情况签，Let's Encrypt 的 certbot 一条命令就够）：
 
