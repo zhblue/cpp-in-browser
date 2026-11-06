@@ -245,6 +245,10 @@
   .wrow .wn { flex: 0 1 auto; min-width: 9ch; max-width: 34ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--acc); }
   .wrow .wt { flex: none; min-width: 9ch; color: var(--dim); }
   .wrow .wv { flex: 1; min-width: 0; word-break: break-all; }
+  /* 按列宽铺开的那几行（数组、字符串）只许占一行：值已经按 measureText 量着切到
+     刚好放下，真放不下（字体没量准、列忽然变窄）也用省略号收，绝不换行撑高行。
+     其余行（错误说明那种长句子）照旧可以折行，信息不截。 */
+  .wrow.fit1 .wv { white-space: nowrap; word-break: normal; overflow: hidden; text-overflow: ellipsis; }
   .wrow.stale .wv { color: var(--warn); }
   .wrow.off .wv, .wrow.idle .wv { color: var(--dim); font-style: italic; }
   .wrow .wx { flex: none; padding: 0 6px; line-height: 1.3; }
@@ -344,7 +348,7 @@
   <button id="dbg-step">下一行</button>
   <button id="dbg-pause" class="secondary">暂停</button>
   <button id="dbg-quit" class="danger">退出调试</button>
-  <span id="dbghint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值，数组会展开前 50 个元素（观察窗里挤不下，只铺前 8 个；<b>整段都是可显示文字的 <code>char[]</code> 直接写成 <code>"hello"</code> 这样的字符串，不再一个一个报数</b>）。编辑器下面那条「观察」栏钉住的是表达式，不只变量名：<code>a[i]</code>、<code>a[j+1] &gt; a[j]</code>、<code>m[1][2]</code>、<code>*p</code>、<code>&amp;x</code>、<code>(double)x / n</code> 都跟着每一行刷新（成员访问和函数调用还不行），名单存在浏览器里，下次调试还在；不在当前行快照名单里的名字会标出来。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选。每执行一行源码，左边那栏的「热力」就把这一行的背景加红一档（按次数取 log2，最重只到不吃字的程度），退出调试后红色保留着，用来找程序里最值得优化的位置；没停住时把鼠标放到红行上能看到确切次数。</span>
+  <span id="dbghint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值，数组会展开前 50 个元素（观察窗那一列按自己的宽度尽量铺开，窄了就省略号收尾，永远只占一行高；<b>整段都是可显示文字的 <code>char[]</code> 直接写成 <code>"hello"</code> 这样的字符串，不再一个一个报数</b>）。编辑器下面那条「观察」栏钉住的是表达式，不只变量名：<code>a[i]</code>、<code>a[j+1] &gt; a[j]</code>、<code>m[1][2]</code>、<code>*p</code>、<code>&amp;x</code>、<code>(double)x / n</code> 都跟着每一行刷新（成员访问和函数调用还不行），名单存在浏览器里，下次调试还在；不在当前行快照名单里的名字会标出来。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选。每执行一行源码，左边那栏的「热力」就把这一行的背景加红一档（按次数取 log2，最重只到不吃字的程度），退出调试后红色保留着，用来找程序里最值得优化的位置；没停住时把鼠标放到红行上能看到确切次数。</span>
   <div class="state" id="dbgstate">—</div>
   <div class="grow"></div>
 </div>
@@ -367,13 +371,13 @@
       <div class="wbar">
         <span class="lab">观察</span>
         <input type="text" id="watch-add" list="watch-names" placeholder="表达式，如 a[i]、a[j+1] &gt; a[j]" spellcheck="false"
-               title="输入表达式回车加入：下标、四则、比较、逻辑、位运算、一元、三元、强制转换、解引用 *p、取地址 &x 都能算，a[i]、a[10]、m[1][2]、*(a+j)、x/0 这类都行。名单存在浏览器里，下次调试还在。停在某行时这里是「这一行开始前」的值；不在当前行快照名单里的名字会标出来。成员访问（s.x / p-&gt;v）、函数调用（v.size()）、全局变量本期还算不了。数组在面板里铺开前 8 个元素，完整的前 50 个把鼠标放到源码里的变量名上看悬停框；整段都是可显示文字的 char[] 不按元素报数，直接写成 &quot;hello&quot; 这样一句（面板给 64 个字符，悬停框给 200 个）。">
+               title="输入表达式回车加入：下标、四则、比较、逻辑、位运算、一元、三元、强制转换、解引用 *p、取地址 &x 都能算，a[i]、a[10]、m[1][2]、*(a+j)、x/0 这类都行。名单存在浏览器里，下次调试还在。停在某行时这里是「这一行开始前」的值；不在当前行快照名单里的名字会标出来。成员访问（s.x / p-&gt;v）、函数调用（v.size()）、全局变量本期还算不了。数组在面板里按这一列的宽度尽量铺开，挤不下靠省略号收尾（量不出宽度时退回 8 个），要看前 50 个把鼠标放到源码里的变量名上看悬停框；整段都是可显示文字的 char[] 不按元素报数，直接写成 &quot;hello&quot; 这样一句（面板同样按宽度铺，量不出宽度才给 64 个字符；悬停框固定 200 个）。">
         <datalist id="watch-names"></datalist>
         <button id="watch-push" class="mini secondary">添加</button>
         <button id="watch-clear" class="mini secondary">清空</button>
         <span class="wnote" id="watchtip"></span>
         <span class="grow"></span>
-        <span class="wnote">数组悬停看前 50 个值</span>
+        <span class="wnote">数组按这一列的宽度铺，悬停看前 50 个</span>
       </div>
       <div class="wlist empty" id="wlist"></div>
     </div>

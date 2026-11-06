@@ -1757,6 +1757,61 @@ function varTy(v) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 一行放得下多少就铺多少。观察窗以前固定铺 8 个元素，可那一列实际有六七百像素 */
+/* 宽，等宽字体下二十几个都塞得下，窗口拉大还能更多 —— 所以现在按列宽量着给。  */
+/* 量文字用 canvas 的 measureText，字体从那一列的 computed style 取，全程不摸 */
+/* DOM 布局；clientWidth 只在 refreshWatch 开头集中读一次（读布局会强制同步重 */
+/* 排，和写文本交错着来就是每行一次）。预算里连尾巴那句「…（共 N 个）」也算进 */
+/* 去，否则加上它正好超一格，行高就被撑成两行。拿不到 canvas、或者            */
+/* 列还没布局（px=0）时退回原来的定数，不硬撑。                              */
+/* ------------------------------------------------------------------ */
+const FIT_MAX = 200;      /* 一行最多尝试铺多少个片段（等宽列摆不下更多） */
+
+const measurer = (() => {
+  const cv = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+  const ctx = cv ? cv.getContext('2d') : null;
+  let font = '';
+  return {
+    ok: !!ctx,
+    /* 换行/换字号/换配色之后 font 会变，取一次比每次量都读 computed style 便宜 */
+    use(el) {
+      if (!ctx || !el) return;
+      const cs = getComputedStyle(el);
+      const f = (cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily).trim();
+      if (f !== font) { font = f; ctx.font = f; }
+    },
+    w(s) { return ctx ? ctx.measureText(s).width : 0; }
+  };
+})();
+
+/* pieces 是已经写好的片段（元素值，或字符串的一个字符）；pre/post 是外层括号，
+   sep 是片段间的分隔符，noteFor(k) 是截断时要补的那句。px > 0 走量宽那条路，
+   否则按 limit 个切。total 是这一段的**真实**元素个数：pieces 可能本来就只给了
+   前若干个（悬停框只读 50 个、量宽那条路最多铺 FIT_MAX 个），截断与否要同 total
+   比，不能同 pieces.length 比 —— 不然「一共 100 个、这里只给了 50 个」这一句会被
+   判成「全给了」，尾巴整个丢掉。 */
+function fitLine(px, limit, pieces, pre, post, sep, noteFor, total) {
+  const n = pieces.length;
+  const tot = Math.max(total === undefined ? n : total, n);
+  if (!(px > 0) || !measurer.ok) {
+    const m = Math.min(n, limit || n);
+    return pre + pieces.slice(0, m).join(sep) + post + (m < tot ? noteFor(m) : '');
+  }
+  const budget = px - 2;               /* 留 2 px：亚像素抖动不该把一行挤成两行 */
+  const sepW = measurer.w(sep);
+  let used = measurer.w(pre + post);
+  let k = 0;
+  for (; k < n; ++k) {
+    const add = measurer.w(pieces[k]) + (k ? sepW : 0);
+    if (used + add > budget) break;
+    used += add;
+  }
+  while (k > 0 && k < tot && measurer.w(pre + pieces.slice(0, k).join(sep) + post + noteFor(k)) > budget) k -= 1;
+  if (k < 1) k = 1;                    /* 再窄也至少给一个，别空着一行 */
+  return pre + pieces.slice(0, k).join(sep) + post + (k < tot ? noteFor(k) : '');
+}
+
+/* ------------------------------------------------------------------ */
 /* char[] 当字符串看。元素是 1 字节整数（char / unsigned char / int8_t）、 */
 /* 内容又全是可显示的文字，就直接写成 "…"，不再一个一个报十进制。           */
 /* 「可显示」按 UTF-8 严格解码判定：解不出合法 UTF-8，或者解出来还带着控制   */
@@ -1766,7 +1821,7 @@ function varTy(v) {
 /* 也不显示。整个数组都没有 0 时按定宽字段处理，全可显示就照抄。             */
 /* bool 不会被误认：它的 kind 是 'bool'，不是 'int'。                       */
 /* ------------------------------------------------------------------ */
-const STR_WATCH_N = 64;   /* 观察窗一行铺开多少个字符 */
+const STR_WATCH_N = 64;   /* 量不出宽度时观察窗一行退回铺多少个字符 */
 const STR_TIP_N = 200;    /* 悬停框铺开多少个字符 */
 const STR_SCAN_MAX = 4096; /* 找结尾那个 0 最多扫多少字节：再长的数组只报「至少」 */
 const utf8Strict = typeof TextDecoder !== 'undefined'
@@ -1776,10 +1831,11 @@ function isCharTy(t) {
   return !!t && t.kind === 'int' && (t.bytes === 1 || t.bits === 8);
 }
 
-/* 像字符串就返回带引号的那一句，不像（或内存还没递过来）返回 null。 */
-function charText(addr, count, limit) {
+/* 像字符串就返回转义好的字符数组（外加长度信息），不像（或内存还没递过来）
+   返回 null —— 铺几个、加不加省略号那句，全交给 fitLine 按行宽定。 */
+function charPieces(addr, count) {
   const dv = dbg.gdv;
-  if (!dv || !utf8Strict || !addr || !count || limit <= 0) return null;
+  if (!dv || !utf8Strict || !addr || !count) return null;
   const hi = Math.min(count, STR_SCAN_MAX);
   let end = hi;
   for (let i = 0; i < hi; ++i) {
@@ -1794,39 +1850,42 @@ function charText(addr, count, limit) {
   let s;
   try { s = utf8Strict.decode(bytes); }
   catch (e) { return null; }             /* 不是合法 UTF-8：退回逐个元素报数 */
-  const body = new Array(s.length);
+  const parts = new Array(s.length);
   for (let i = 0; i < s.length; ++i) {
     const c = s.charCodeAt(i);
-    if (c === 0x09) body[i] = '\\t';
-    else if (c === 0x0a) body[i] = '\\n';
-    else if (c === 0x0d) body[i] = '\\r';
+    if (c === 0x09) parts[i] = '\\t';
+    else if (c === 0x0a) parts[i] = '\\n';
+    else if (c === 0x0d) parts[i] = '\\r';
     else if (c < 0x20 || c === 0x7f) return null;   /* 其余控制字符：不像文字 */
-    else body[i] = (c === 0x22 || c === 0x5c) ? '\\' + s[i] : s[i];
+    else parts[i] = (c === 0x22 || c === 0x5c) ? '\\' + s[i] : s[i];
   }
-  const k = Math.min(s.length, limit);
   /* 「共」还是「至少」：看见过结尾的 0（end < hi），或者整个数组都在扫描范围里
      （hi === count），长度才是确定的；只有被 STR_SCAN_MAX 截断的那一段才说不准。 */
-  const tot = end < hi || hi === count ? `共 ${s.length}` : `至少 ${s.length}`;
-  const more = s.length > k ? `…（${tot} 个字符，只显示前 ${k} 个）` : '';
-  return `"${body.slice(0, k).join('')}"${more}`;
+  return { parts: parts, known: end < hi || hi === count };
 }
 
 /* 一段内存里的 n 个同类型元素铺开成 { … }，超过 limit 就把总长度报出来。
    读不到的位置（越界、元素宽度不认识）给一个「·」，不猜值。
-   字符数组先试字符串那条路（strLimit 是字符串档位，没给就沿用 limit）。 */
-function cellsText(addr, elemTy, count, limit, strLimit) {
+   字符数组先试字符串那条路；px > 0 时按这一列的像素宽度尽量多铺（观察窗），
+   否则退回 limit 个定数（悬停框）。 */
+function cellsText(addr, elemTy, count, limit, strLimit, px) {
   if (isCharTy(elemTy)) {
-    const s = charText(addr, count, strLimit === undefined ? limit : strLimit);
-    if (s !== null) return s;
+    const cp = charPieces(addr, count);
+    if (cp) {
+      /* 尾巴那句越短，同一行能塞下的字符就越多 —— 省略号本身已经说明「没铺完」，
+         这里只补一个总长，不再重复「只显示前 k 个」。 */
+      const noteFor = (k) => `…（${cp.known ? '共' : '至少'} ${cp.parts.length} 个字符）`;
+      return fitLine(px, strLimit, cp.parts, '"', '"', '', noteFor);
+    }
   }
-  const n = Math.min(count, limit || count);
-  const cells = new Array(n);
-  for (let i = 0; i < n; ++i) {
+  const cap = px > 0 && measurer.ok ? Math.min(count, FIT_MAX) : Math.min(count, limit || count);
+  const pieces = new Array(cap);
+  for (let i = 0; i < cap; ++i) {
     const x = readAt(addr + i * elemTy.bytes, elemTy);
-    cells[i] = x === null ? '·' : showVal(elemTy, x);
+    pieces[i] = x === null ? '·' : showVal(elemTy, x);
   }
-  const more = count > n ? `…（共 ${count} 个，只显示前 ${n} 个）` : '';
-  return `{ ${cells.join(', ')} }${more}`;
+  const noteFor = (k) => `…（共 ${count} 个）`;
+  return fitLine(px, limit, pieces, '{ ', ' }', ', ', noteFor, count);
 }
 
 /* 数组的前 limit 个元素：地址从控制块的地址表里拿（那是 __pg_addr 在每行快照时
@@ -2231,14 +2290,19 @@ function truthy(r) {
   return v !== 0;
 }
 
-/* 结果值写成一行。数组（a[i] 落在多维数组上剩下的那一行也是数组）铺开给
-   limit 个，字符数组走字符串那条路（strLimit），其它类型走 showVal ——
-   和悬停完全同一套格式化。 */
-function showRes(r, limit, strLimit) {
+/* 结果值写成一行。数组（a[i] 落在多维数组上剩下的那一行也是数组）按 px 这一列
+   的宽度尽量铺开（拿不到宽度就 limit 个；字符数组走 strLimit），其它类型走
+   showVal —— 和悬停完全同一套格式化。fit 标记「这行是按宽度铺的」，样式据此
+   只许一行、放不下就省略号，不让它换行把面板撑高。 */
+function showRes(r, limit, strLimit, px) {
   if (r.ty.kind === 'arr') {
     if (r.addr === undefined) throw exprErr('这个数组值没有地址，读不出元素');
     const n = dimProd(r.ty.dims);
-    return { ty: r.ty.name, text: cellsText(r.addr, r.ty.elem, n, limit, strLimit) };
+    return {
+      ty: r.ty.name,
+      text: cellsText(r.addr, r.ty.elem, n, limit, strLimit, px),
+      fit: px > 0,
+    };
   }
   if (r.addr !== undefined) {
     const x = readAt(r.addr, r.ty);
@@ -2546,8 +2610,10 @@ function evalNode(n, ctx) {
 /* 停在某行时看到的是「这一行开始前」的状态 —— 和悬停完全同一套数据：   */
 /* 标量取快照的 val，数组和指针按登记的栈槽地址直接读共享内存。         */
 /*                                                                    */
-/* 数组在面板里只铺开前 8 个 —— 一行高度放 50 个就把别的行顶出视野了， */
-/* 要看全的把鼠标放到源码里的变量名上（tooltip 给前 50 个）。           */
+/* 数组在面板里铺多少个，由这一列的实际宽度决定（见上面按列宽量着给那一 */
+/* 节）：列宽了就多铺，挤不下靠省略号收尾，行高始终只占一行；量不出宽度 */
+/* 时退回固定 8 个。悬停框不参与测量（它不占面板的高度），仍给前 50 个  */
+/* 元素。                                                               */
 /* ------------------------------------------------------------------ */
 const WATCH_KEY = 'cpp-playground.watch';
 const WATCH_MAX = 24;
@@ -2596,18 +2662,20 @@ function pickVar(name, line) {
 
 /* 一行观察结果：表达式 -> {类型, 值, 状态}。
    会话没开始、式子写错、式子对的但这一行拿不到值，三种情况分开说 —— 面板上
-   留着的永远是「这一行开始前」的状态，跟悬停同一个口径。 */
-function watchValue(expr, line) {
+   留着的永远是「这一行开始前」的状态，跟悬停同一个口径。
+   px 是这一行「值」那一列现在有多少像素宽，数组/字符串按它决定铺多少个。 */
+function watchValue(expr, line, px) {
   if (!dbg.active || !dbg.cb) return { ty: '—', val: '会话未开始', cls: 'idle' };
   const p = parseWatch(expr);
   if (p.err) return { ty: '—', val: p.err, cls: 'off' };
   const ctx = { line: line, cb: dbg.cb, stale: '' };
   try {
-    const r = showRes(evalNode(p.ast, ctx), WATCH_ARR_N, STR_WATCH_N);
+    const r = showRes(evalNode(p.ast, ctx), WATCH_ARR_N, STR_WATCH_N, px);
     return {
       ty: r.ty,
       val: r.text + ctx.stale,
       cls: ctx.stale ? 'stale' : '',
+      fit: r.fit && !ctx.stale,
     };
   } catch (e) {
     if (e.expr) return { ty: '—', val: e.message, cls: 'off' };
@@ -2646,13 +2714,23 @@ function buildWatchRows() {
 function refreshWatch() {
   if (!watchItems.length) return;
   const line = dbg.active && dbg.ctl ? dbg.ctl[DBG.S.LINE] : 0;
+  /* 先读后写：值那一列还剩多宽是布局属性（clientWidth），读它会强制同步布局。
+     一趟里把宽度全量完再去改文本，就只有一次布局；一行「写→读」交错着来，24 行
+     就是 24 次重排，而这里是 50 ms 一轮询。 */
+  const todo = [];
   for (const expr of watchItems) {
     const r = watchRows.get(expr);
-    if (!r) continue;
-    const o = watchValue(expr, line);
-    r.ty.textContent = o.ty;
-    r.val.textContent = o.val;
-    r.row.className = 'wrow' + (o.cls ? ' ' + o.cls : '');
+    if (r) todo.push({ r: r, px: r.val.clientWidth, expr: expr });
+  }
+  if (!todo.length) return;
+  measurer.use(todo[0].r.val);            /* 字体：观察窗整块都是 .wlist 那一条 */
+  for (const it of todo) {
+    const o = watchValue(it.expr, line, it.px);
+    it.r.ty.textContent = o.ty;
+    it.r.val.textContent = o.val;
+    /* 值被宽度切掉时（连省略号都不够放），悬停至少能看到面板上这一整句 */
+    it.r.val.title = o.val;
+    it.r.row.className = 'wrow' + (o.cls ? ' ' + o.cls : '') + (o.fit ? ' fit1' : '');
   }
 }
 
