@@ -10,8 +10,9 @@
 'use strict';
 importScripts('wasmclang.js', 'dbgproto.js');
 
-/* 行桩的宿主实现。放在闭包里，避免每次调用都重新取常量。 */
-function makeTracer(c) {
+/* 行桩的宿主实现。放在闭包里，避免每次调用都重新取常量。
+   onPark 可选：每次真要停住之前叫一下，让外面把用户内存的 SAB 递出去。 */
+function makeTracer(c, onPark) {
   const S = DBG.S, MODE = DBG.MODE, STATE = DBG.STATE, REASON = DBG.REASON;
   const MAXL = DBG.MAX_LINE;
   const ctl = c.ctl, bp = c.bp, heat = c.heat;
@@ -56,6 +57,11 @@ function makeTracer(c) {
     if (mode === MODE.PAUSE || mode === MODE.STEP || hit) {
       Atomics.store(ctl, S.REASON,
         hit ? REASON.BP : (mode === MODE.STEP ? REASON.STEP : REASON.PAUSE));
+      /* 停住之前先把用户线性内存那块 SharedArrayBuffer 交给主线程：主线程只在
+         PARK 期间读它（悬停、观察窗的 a[i] 都算），而内存 grow 过之后 buffer 会
+         换成一个新对象，所以这里按对象身份判断，换了才发一次。发在置 PARK 之前，
+         免得主线程已经看见 PARK 了却还没收到新的 SAB。 */
+      if (onPark) onPark();
       Atomics.store(ctl, S.STATE, STATE.PARK);
       const p0 = performance.now();
       while (Atomics.load(ctl, S.STATE) === STATE.PARK) {
@@ -82,6 +88,26 @@ function makeVarWriter(c) {
     val[id * 2] = lo;
     val[id * 2 + 1] = hi;
     wr[id] = 1;
+  };
+}
+
+/* 数组变量的地址登记：arr 段每个变量固定 ARR_W 个 int32 —— [0]=首元素地址、
+   [1]=元素字节数、[2]=元素个数，count=0 就是「这个槽还没写过」。
+
+   这里不再搬元素了。以前是从 wasm 线性内存 memcpy 前 50 个元素进控制块，因为
+   那时候主线程拿不到用户内存；现在调试构建链的是 --shared-memory，主线程手里
+   就有同一块内存，按地址读就行。少一份拷贝，也少一份会过期的真相：悬停展开、
+   观察窗的 a[i]、表达式里的 *p，读的都是内存本身，所以三个地方永远不会打架。
+   一次调用三格普通写，代价小到不用再按「这一行会不会停住」设放行条件。 */
+function makeAddrRec(c) {
+  const arr = c.arr;
+  const max = DBG.MAX_VAR, W = DBG.ARR_W;
+  return function arrAddr(id, addr, bytes, count) {
+    if (id < 0 || id >= max) return;
+    const base = id * W;
+    arr[base] = addr;
+    arr[base + 1] = bytes;
+    arr[base + 2] = count;
   };
 }
 
@@ -113,26 +139,46 @@ self.onmessage = async (ev) => {
 
     const module = await WebAssembly.compile(new Uint8Array(m.wasm));
 
-    /* 调试构建的模块会导入 env.__pg_trace 和 env.__pg_var；没给控制块就退化成
+    /* 调试构建的模块会导入 env.__pg_trace / __pg_var / __pg_addr；没给控制块就退化成
        空桩，至少程序还能跑完，不会变成一个看不懂的 LinkError。 */
+    /* 用户内存要等 WasiApp 实例化完才拿得到，所以下面传的都是取值器/回调，
+       不是内存本身。共享内存 grow 之后 buffer 会换成新的 SAB，主线程要的是
+       「当前那块」，所以停住时按对象身份比一次，变了就再递一次。 */
+    let app = null;
+    let sentSab = null;
+    const getMem = () => (app ? app.mem : null);
+    const postSab = () => {
+      const mem = getMem();
+      if (!mem || mem.buffer === sentSab) return;
+      sentSab = mem.buffer;
+      postMessage({ type: 'guest', sab: sentSab });
+    };
     let extra = null;
     if (m.ctl) {
       const c = DBG.attachControlBlock(m.ctl);
-      extra = { env: { __pg_trace: makeTracer(c), __pg_var: makeVarWriter(c) } };
+      extra = {
+        env: {
+          __pg_trace: makeTracer(c, postSab), __pg_var: makeVarWriter(c),
+          __pg_addr: makeAddrRec(c),
+        },
+      };
       Atomics.store(c.ctl, DBG.S.STATE, DBG.STATE.EXEC);
     } else {
       const names = new Set(WebAssembly.Module.imports(module)
         .filter((i) => i.module === 'env')
         .map((i) => i.name));
-      if (names.has('__pg_trace') || names.has('__pg_var')) {
-        extra = { env: { __pg_trace: () => {}, __pg_var: () => {} } };
+      if (names.has('__pg_trace') || names.has('__pg_var') || names.has('__pg_addr')) {
+        extra = { env: { __pg_trace: () => {}, __pg_var: () => {}, __pg_addr: () => {} } };
       }
     }
 
-    const app = extra
+    app = extra
       ? new WasmClang.WasiApp(module, memfs, m.name || 'main.wasm', extra)
       : new WasmClang.WasiApp(module, memfs, m.name || 'main.wasm');
     await app.ready;
+    /* 先递一次内存：实例化时 wasm-ld 可能已经按 --max-memory 之外的初值 grow 过，
+       主线程第一次轮询到停住之前就该拿到当前这块。 */
+    if (m.ctl) postSab();
     exit = await app.start();
     exit.memoryBytes = app.exports.memory.buffer.byteLength;
     exit.note = exit.error ? String((exit.error.message || exit.error)) : null;

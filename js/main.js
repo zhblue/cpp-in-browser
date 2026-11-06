@@ -1147,6 +1147,8 @@ function onCompileMessage(ev) {
     case 'result':
       if (m.ok) {
         lastCompileMs = m.ms;
+        /* 观察窗的补全名单跟着每次插桩构建刷新（普通运行没有变量表，跳过） */
+        if (m.vars) fillWatchNames(m.vars);
         compileResolve && compileResolve({
           wasm: m.wasm, lines: m.lines || null,
           vars: m.vars || null, lineVars: m.lineVars || null,
@@ -1196,6 +1198,8 @@ function runProgram(wasmBytes, stdinText, timeoutMs, ctl) {
     runWorker.onmessage = (ev) => {
       const m = ev.data;
       if (m.type === 'write') pushBytes(new Uint8Array(m.bytes));
+      /* 只有调试构建会发这条：把用户模块那块共享线性内存交过来给悬停和观察窗读 */
+      if (m.type === 'guest') setGuestMemory(m.sab);
       if (m.type === 'exit') {
         clearWatchdog();
         runWorker.terminate();
@@ -1341,7 +1345,16 @@ const dbg = {
      避免每个 tick 都把同一档的 marker 删了重建。 */
   heatMarks: new Map(), heatLv: new Map(), heatN: new Map(),
   heatRows: null, heatMax: { n: 0, line: 0 }, heatTick: 0,
+  /* 用户程序的线性内存。调试构建链的是共享内存，运行 Worker 会把它的
+     SharedArrayBuffer 递过来（grow 之后会换一块新的，所以每次收都重建视图），
+     数组展开和观察窗的表达式就按地址从这里读。 */
+  guest: null, gdv: null,
 };
+
+function setGuestMemory(sab) {
+  dbg.guest = sab || null;
+  dbg.gdv = sab ? new DataView(sab) : null;
+}
 
 function dbgSupported() { return typeof SharedArrayBuffer !== 'undefined'; }
 
@@ -1580,6 +1593,9 @@ function dbgTick() {
      提前返回，不碰 marker 层。 */
   if (parked) paintHeat();
   else if (++dbg.heatTick >= 4) { dbg.heatTick = 0; paintHeat(); }
+  /* 观察窗每趟都刷：它报的就是 val/arr 里的当前快照，代价只有十几行 textContent，
+     而「跟着单步一起跳」正是这个面板存在的意义。 */
+  refreshWatch();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1599,40 +1615,54 @@ const varTipEl = (() => {
 
 function hideVarTip() { varTipEl.style.display = 'none'; }
 
-/* 把一个快照还原成人类可读的值：kind 决定怎么解释那两个 int32 */
-function fmtVar(v, lo, hi) {
+/* 两个 int32 按类型描述还原成数值：数字，64 位给 BigInt。
+   悬停/观察窗的格式化（fmtVar）和表达式求值器读内存用的是同一个函数，
+   两条路对同一个字节的解释不可能对不上。 */
+function numFromBits(t, lo, hi) {
   const u = lo >>> 0;
   const uh = hi >>> 0;
-  const bits = v.bits || 32;
-  if (v.kind === 'bool') return u ? 'true' : 'false';
-  if (v.kind === 'float') {
+  const bits = t.bits || 32;
+  if (t.kind === 'bool') return u ? 1 : 0;
+  if (t.kind === 'float') {
     const dv = new DataView(new ArrayBuffer(8));
     dv.setUint32(0, u, true);
     dv.setUint32(4, uh, true);
-    const x = bits === 32 ? dv.getFloat32(0, true) : dv.getFloat64(0, true);
+    return bits === 32 ? dv.getFloat32(0, true) : dv.getFloat64(0, true);
+  }
+  if (t.kind === 'ptr') return u;
+  if (bits === 64) {
+    /* 64 位用 BigInt，免得超过 2^53 掉精度 */
+    return t.signed ? (BigInt(hi) << 32n) | BigInt(u) : (BigInt(uh) << 32n) | BigInt(u);
+  }
+  if (bits === 32) return t.signed ? (lo | 0) : u;
+  const m = (1 << bits) - 1;
+  let x = u & m;
+  if (t.signed && (x & (1 << (bits - 1)))) x -= (1 << bits);
+  return x;
+}
+
+/* 数值写成人类可读的样子：指针给地址，bool 给字面量，char 带上字符提示 */
+function showVal(t, x) {
+  if (t.kind === 'bool') return x ? 'true' : 'false';
+  if (t.kind === 'float') {
     if (Number.isNaN(x)) return 'NaN';
     if (!Number.isFinite(x)) return x > 0 ? 'inf' : '-inf';
     return Object.is(x, -0) ? '-0' : String(x);
   }
-  if (v.kind === 'ptr') return '0x' + u.toString(16).padStart(8, '0');
-  let s;
-  if (bits === 64) {
-    /* 64 位用 BigInt，免得超过 2^53 掉精度 */
-    s = (v.signed ? (BigInt(hi) << 32n) | BigInt(u)
-                  : (BigInt(uh) << 32n) | BigInt(u)).toString();
-  } else if (bits === 32) {
-    s = String(v.signed ? (lo | 0) : u);
-  } else {
-    const m = (1 << bits) - 1;
-    let x = u & m;
-    if (v.signed && (x & (1 << (bits - 1)))) x -= (1 << bits);
-    s = String(x);
-    if (bits === 8 && /char/.test(v.tname || '')) {
-      const g = x >= 32 && x < 127 ? `'${String.fromCharCode(x)}' ` : '';
-      s = `${g}${x}`;
-    }
+  if (t.kind === 'ptr') return '0x' + (x >>> 0).toString(16).padStart(8, '0');
+  const s = typeof x === 'bigint' ? x.toString() : String(x);
+  const bits = t.bits || 32;
+  if (bits === 8 && /char/.test(t.name || t.tname || '')) {
+    const n = typeof x === 'bigint' ? Number(x) : x;
+    const g = n >= 32 && n < 127 ? `'${String.fromCharCode(n)}' ` : '';
+    return `${g}${s}`;
   }
   return s;
+}
+
+/* 把一个快照还原成人类可读的值：kind 决定怎么解释那两个 int32 */
+function fmtVar(v, lo, hi) {
+  return showVal(v, numFromBits(v, lo, hi));
 }
 
 /* 停在某行时能看到的变量：名字 -> 变量描述。
@@ -1653,8 +1683,175 @@ function liveVarsAt(line) {
   return map;
 }
 
+/* 悬停/面板里一次铺开多少个元素。纯显示上限，不再是缓冲区宽度 —— 元素本来就
+   在主线程直接读的那块共享内存里，想给多少个都行，只是 tooltip 会撑成一屏日志。 */
+const ARR_TIP_N = 50;
+
+/* 从用户的共享线性内存里按地址读一个元素，返回那两个小端 int32。
+   字节宽度优先用类型描述自带的（插桩时算好的），回落到 DWARF 位宽推。
+   越界、宽度不认识、内存还没递过来 —— 一律返回 null，由调用方说清楚原因，
+   绝不猜一个数填上去。 */
+function memPeek(addr, d) {
+  const dv = dbg.gdv;
+  if (!dv || !addr) return null;
+  const b = d.bytes || (d.kind === 'ptr' ? 4 : ((d.bits || 0) >> 3));
+  if (b !== 1 && b !== 2 && b !== 4 && b !== 8) return null;
+  if (addr < 0 || addr + b > dv.byteLength) return null;
+  let lo, hi = 0;
+  if (b === 1) lo = dv.getUint8(addr);
+  else if (b === 2) lo = dv.getUint16(addr, true);
+  else if (b === 4) lo = dv.getUint32(addr, true);
+  /* 高 32 位一定要按「有符号」取：numFromBits 的 64 位分支靠 BigInt(hi) << 32 的
+     符号扩展还原负数，取成无符号的话 -1 会报成 18446744073709551615。
+     （标量那条通道存的就是 Int32Array，天然带符号，所以没这个问题。） */
+  else { lo = dv.getUint32(addr, true); hi = dv.getInt32(addr + 4, true); }
+  return { lo: lo, hi: hi, bytes: b };
+}
+
+/* 按类型从内存里取一个值；读不到给 null（求值器拿它区分「0」和「没读着」） */
+function readAt(addr, ty) {
+  const p = memPeek(addr, ty);
+  return p ? numFromBits(ty, p.lo, p.hi) : null;
+}
+
+/* 类型描述归一化。插桩送回来的变量记录（rec）和 rec.pt 那种 wireTy 节点形状不完全
+   一样（一个用 tname/ekind，一个用 name/elem），这里统一成求值器认的那一份：
+   { kind, bits, signed, name, bytes }，数组再带 elem + dims，指针再带 pt。
+   bytes 是「这个类型在内存里占几个字节」，算下标偏移全靠它；拿不准就是 0，
+   求值器看到 0 会明说算不了，不会闷头猜。 */
+function normTy(t) {
+  if (!t) return { kind: 'unknown', name: '?', bytes: 0 };
+  const o = {
+    kind: t.kind || 'unknown', bits: t.bits || 0, signed: !!t.signed,
+    name: t.name || t.tname || '?',
+    bytes: t.bytes || (t.kind === 'ptr' ? 4 : ((t.bits || 0) >> 3)),
+  };
+  if (o.kind === 'arr') {
+    o.elem = normTy(t.elem);
+    o.dims = (t.dims && t.dims.length) ? t.dims.slice() : [0];
+  }
+  if (o.kind === 'ptr') o.pt = normTy(t.pt);
+  return o;
+}
+
+/* 变量记录 -> 类型描述。数组的元素类型优先用插桩带回来的 et（那是完整的 wireTy，
+   指针元素还能继续往下剥），老构建没有 et 才用 ekind/ebits 这几个散字段拼。 */
+function varTy(v) {
+  if (v.kind === 'arr') {
+    const e = v.et ? normTy(v.et) : normTy({
+      kind: v.ekind, bits: v.ebits, signed: v.esigned, name: v.ename, bytes: v.ebytes,
+    });
+    return {
+      kind: 'arr', name: v.tname || (e.name + '[]'), bytes: e.bytes,
+      elem: e, dims: (v.adims && v.adims.length) ? v.adims.slice() : [v.acount || 0],
+    };
+  }
+  if (v.kind === 'ptr') {
+    return { kind: 'ptr', bits: 32, signed: false, name: v.tname || 'void*', bytes: 4, pt: normTy(v.pt) };
+  }
+  /* 标量：变量记录里的 name 是变量名，类型名在 tname 上，别让它俩串位
+     （不然观察窗的类型列会显示成 `x : x = 42`）。 */
+  return normTy({
+    kind: v.kind, bits: v.bits, signed: v.signed, name: v.tname,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* char[] 当字符串看。元素是 1 字节整数（char / unsigned char / int8_t）、 */
+/* 内容又全是可显示的文字，就直接写成 "…"，不再一个一个报十进制。           */
+/* 「可显示」按 UTF-8 严格解码判定：解不出合法 UTF-8，或者解出来还带着控制   */
+/* 字符（\t \n \r 除外，它们写成转义，不然一行放不平），就退回逐个元素铺开 —— */
+/* 报一屏乱码不如报数，所以宁可退回，不猜。                                 */
+/* 第一个 0 是 C 字符串的结尾：它之后的字节（补位用的那一大片 0）不参与判定， */
+/* 也不显示。整个数组都没有 0 时按定宽字段处理，全可显示就照抄。             */
+/* bool 不会被误认：它的 kind 是 'bool'，不是 'int'。                       */
+/* ------------------------------------------------------------------ */
+const STR_WATCH_N = 64;   /* 观察窗一行铺开多少个字符 */
+const STR_TIP_N = 200;    /* 悬停框铺开多少个字符 */
+const STR_SCAN_MAX = 4096; /* 找结尾那个 0 最多扫多少字节：再长的数组只报「至少」 */
+const utf8Strict = typeof TextDecoder !== 'undefined'
+  ? new TextDecoder('utf-8', { fatal: true }) : null;
+
+function isCharTy(t) {
+  return !!t && t.kind === 'int' && (t.bytes === 1 || t.bits === 8);
+}
+
+/* 像字符串就返回带引号的那一句，不像（或内存还没递过来）返回 null。 */
+function charText(addr, count, limit) {
+  const dv = dbg.gdv;
+  if (!dv || !utf8Strict || !addr || !count || limit <= 0) return null;
+  const hi = Math.min(count, STR_SCAN_MAX);
+  let end = hi;
+  for (let i = 0; i < hi; ++i) {
+    const p = addr + i;
+    if (p < 0 || p >= dv.byteLength) return null;
+    if (dv.getUint8(p) === 0) { end = i; break; }
+  }
+  /* TextDecoder 不吃挂在 SharedArrayBuffer 上的视图（"must not be shared"），
+     所以先把这一段字节拷进一份普通内存；拷的规模由 STR_SCAN_MAX 兜住。 */
+  const bytes = new Uint8Array(end);
+  bytes.set(new Uint8Array(dv.buffer, addr, end));
+  let s;
+  try { s = utf8Strict.decode(bytes); }
+  catch (e) { return null; }             /* 不是合法 UTF-8：退回逐个元素报数 */
+  const body = new Array(s.length);
+  for (let i = 0; i < s.length; ++i) {
+    const c = s.charCodeAt(i);
+    if (c === 0x09) body[i] = '\\t';
+    else if (c === 0x0a) body[i] = '\\n';
+    else if (c === 0x0d) body[i] = '\\r';
+    else if (c < 0x20 || c === 0x7f) return null;   /* 其余控制字符：不像文字 */
+    else body[i] = (c === 0x22 || c === 0x5c) ? '\\' + s[i] : s[i];
+  }
+  const k = Math.min(s.length, limit);
+  /* 「共」还是「至少」：看见过结尾的 0（end < hi），或者整个数组都在扫描范围里
+     （hi === count），长度才是确定的；只有被 STR_SCAN_MAX 截断的那一段才说不准。 */
+  const tot = end < hi || hi === count ? `共 ${s.length}` : `至少 ${s.length}`;
+  const more = s.length > k ? `…（${tot} 个字符，只显示前 ${k} 个）` : '';
+  return `"${body.slice(0, k).join('')}"${more}`;
+}
+
+/* 一段内存里的 n 个同类型元素铺开成 { … }，超过 limit 就把总长度报出来。
+   读不到的位置（越界、元素宽度不认识）给一个「·」，不猜值。
+   字符数组先试字符串那条路（strLimit 是字符串档位，没给就沿用 limit）。 */
+function cellsText(addr, elemTy, count, limit, strLimit) {
+  if (isCharTy(elemTy)) {
+    const s = charText(addr, count, strLimit === undefined ? limit : strLimit);
+    if (s !== null) return s;
+  }
+  const n = Math.min(count, limit || count);
+  const cells = new Array(n);
+  for (let i = 0; i < n; ++i) {
+    const x = readAt(addr + i * elemTy.bytes, elemTy);
+    cells[i] = x === null ? '·' : showVal(elemTy, x);
+  }
+  const more = count > n ? `…（共 ${count} 个，只显示前 ${n} 个）` : '';
+  return `{ ${cells.join(', ')} }${more}`;
+}
+
+/* 数组的前 limit 个元素：地址从控制块的地址表里拿（那是 __pg_addr 在每行快照时
+   登记的栈槽地址，函数返回后同一个槽会被后面的调用复用 —— 和真实调试器一样），
+   元素本身直接读共享内存。 */
+function arrCells(v, limit, strLimit) {
+  if (v.kind !== 'arr' || !v.acount) return { err: '长度未知的数组（变长数组），没法展开' };
+  const cb = dbg.cb;
+  const base = v.id * DBG.ARR_W;
+  const addr = cb ? cb.arr[base] : 0;
+  const count = (cb && cb.arr[base + 2]) || v.acount;
+  if (!cb || !addr || !count) return { err: '尚无快照（这一行还没执行到它的声明）' };
+  if (!dbg.gdv) return { err: '用户内存还没从运行 Worker 递过来' };
+  return { text: cellsText(addr, varTy(v).elem, count, limit, strLimit) };
+}
+
+/* 数组值的一行写法；拿不到快照时把原因原话说出来 */
+function arrText(v, limit, strLimit) {
+  const a = arrCells(v, limit, strLimit);
+  return a.err ? a.err : a.text;
+}
+
 function varTipText(name, v, line) {
   const head = `${name} : ${v.tname || '?'}`;
+  if (v.kind === 'arr') return `${head} = ${arrText(v, ARR_TIP_N, STR_TIP_N)}`;
   if (v.kind === 'obj' || v.kind === 'unknown') {
     return `${head} = 结构体/数组，暂不展开`;
   }
@@ -1715,6 +1912,842 @@ srcEditor.container.addEventListener('mousemove', (ev) => {
 });
 srcEditor.container.addEventListener('mouseleave', hideVarTip);
 
+/* ------------------------------------------------------------------ */
+/* 表达式求值                                                          */
+/*                                                                    */
+/* 观察窗要收 a[i]、*(p+1)、a[i][j]、x/100 > 0.5 这样的式子。wasm 里那 */
+/* 套 clang 没法拿来算 JS 字符串，所以这里自己写一个：词法 -> 递归下降 */
+/* -> 按类型描述算地址 -> 从共享内存读值。它算出来的数不是蒙的，依据有 */
+/* 两条：插桩把每个变量的 DWARF 类型（元素类型、多维数组每一维的长度、 */
+/* 指针指向什么）一起带回了主线程；调试构建链的是共享内存，主线程拿着   */
+/* 地址就能读到程序此刻真实的字节。                                    */
+/*                                                                    */
+/* 覆盖：标识符、整数字面量（含十六进制和 u/l 后缀）、字符字面量、浮点   */
+/* 字面量、true/false/nullptr、下标 []（数组、多维、指针）、括号、一元  */
+/* + - ! ~ * &、二元 + - * / % << >> < <= > >= == != & | ^ && || ?:、 */
+/* 指针加减下标、(类型) 强转。                                         */
+/* 明确不做，碰到了就直说而不是给个看着像答案的数：成员访问 . 和 ->（结 */
+/* 构体字段本期不展开）、函数调用（v.size()）、字符串字面量、++/--（会  */
+/* 写内存，观察窗只读）、全局变量（DWARF 的 llvm.dbg.declare 只报局部量，*/
+/* 插桩表里压根没有它们）。                                            */
+/*                                                                    */
+/* 求值时机跟悬停一样：停住时内存是静止的，读到的一定是干净值；全速跑时 */
+/* 每个 tick 也在刷，可能读到某个赋值写到一半的撕裂值 —— 这是「跟着每行 */
+/* 刷新」换来的，标量通道一直如此。                                    */
+/* ------------------------------------------------------------------ */
+
+/* 表达式里说人话的错误：e.expr 标记这是「该给用户看的一句解释」，
+   不是页面自己出了 bug。求值器绝不静默返回一个猜出来的数。 */
+function exprErr(msg) {
+  const e = new Error(msg);
+  e.expr = true;
+  return e;
+}
+
+const E_INT = { kind: 'int', bits: 32, signed: true, name: 'int', bytes: 4 };
+const E_UINT = { kind: 'int', bits: 32, signed: false, name: 'unsigned int', bytes: 4 };
+const E_SHORT = { kind: 'int', bits: 16, signed: true, name: 'short', bytes: 2 };
+const E_USHORT = { kind: 'int', bits: 16, signed: false, name: 'unsigned short', bytes: 2 };
+const E_LLONG = { kind: 'int', bits: 64, signed: true, name: 'long long', bytes: 8 };
+const E_ULLONG = { kind: 'int', bits: 64, signed: false, name: 'unsigned long long', bytes: 8 };
+const E_FLOAT = { kind: 'float', bits: 32, signed: true, name: 'float', bytes: 4 };
+const E_DOUBLE = { kind: 'float', bits: 64, signed: true, name: 'double', bytes: 8 };
+const E_CHR = { kind: 'int', bits: 8, signed: true, name: 'char', bytes: 1 };
+const E_BOOL = { kind: 'bool', bits: 8, signed: false, name: 'bool', bytes: 1 };
+
+/* ---- 词法 ---- */
+const EX_NUM = /((?:0[xX][0-9a-fA-F]+|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?))([uUlLfF]*)/y;
+const EX_ID = /[A-Za-z_$][\w$]*/y;
+const EX_OP2 = ['<<', '>>', '<=', '>=', '==', '!=', '&&', '||', '++', '--', '->', '::'];
+const EX_OP1 = '+-*/%()[],<>=!&|^~?:;.';
+
+function tokenizeExpr(src) {
+  const tk = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { ++i; continue; }
+    if (c === "'" || c === '"') {
+      let j = i + 1, s = '';
+      while (j < src.length && src[j] !== c) {
+        if (src[j] === '\\') {
+          const e = src[j + 1];
+          s += e === 'n' ? '\n' : e === 't' ? '\t' : e === 'r' ? '\r' : e === '0' ? '\0' : (e === undefined ? '' : e);
+          j += 2;
+        } else { s += src[j]; ++j; }
+      }
+      if (j >= src.length) throw exprErr('引号没有闭合');
+      if (c === '"') throw exprErr('字符串字面量不参与求值：要看内容请直接观察那个 char 数组');
+      if (s.length !== 1) throw exprErr('字符字面量只支持单个字符（\'a\'），多个字符的（\'ab\'）不算');
+      tk.push({ k: 'num', v: s.charCodeAt(0), ty: E_CHR, t: `'${s}'` });
+      i = j + 1;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] || ''))) {
+      EX_NUM.lastIndex = i;
+      const m = EX_NUM.exec(src);
+      if (!m) throw exprErr(`这个数看不懂：${src.slice(i, i + 12)}`);
+      i += m[0].length;
+      tk.push(numToken(m[1], m[2].toLowerCase()));
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      EX_ID.lastIndex = i;
+      const m = EX_ID.exec(src);
+      tk.push({ k: 'id', v: m[0], t: m[0] });
+      i += m[0].length;
+      continue;
+    }
+    const two = src.slice(i, i + 2);
+    if (EX_OP2.indexOf(two) >= 0) { tk.push({ k: 'op', v: two, t: two }); i += 2; continue; }
+    if (EX_OP1.indexOf(c) >= 0) { tk.push({ k: 'op', v: c, t: c }); ++i; continue; }
+    throw exprErr(`这个字符进不了表达式：${c}`);
+  }
+  return tk;
+}
+
+/* 数字字面量的类型：wasm32 里 long 是 32 位、long long 才是 64 位，
+   后缀按这个规则给；没后缀就按 C++ 的规则往能装下的最小类型上靠。
+   十六进制（0x…）里那个 x 不能被当成指数，所以判浮点前先看是不是十六进制。 */
+function numToken(text, suf) {
+  const hex = /^0[xX]/.test(text);
+  if (!hex && /[.eE]/.test(text)) {
+    const bits = suf.indexOf('f') >= 0 ? 32 : 64;
+    return {
+      k: 'num', v: parseFloat(text), t: text,
+      ty: { kind: 'float', bits: bits, signed: true, name: bits === 32 ? 'float' : 'double', bytes: bits / 8 },
+    };
+  }
+  let x;
+  try { x = BigInt(text); } catch (e) { throw exprErr(`这个数看不懂：${text}`); }
+  const u = suf.indexOf('u') >= 0;
+  let bits = suf.indexOf('ll') >= 0 ? 64 : 32;
+  let signed = !u;
+  if (!suf) {
+    if (x > 0x7fffffffn && x <= 0xffffffffn) signed = false;
+    if (x > 0xffffffffn) bits = 64;
+  } else if (u && bits === 32 && x > 0xffffffffn) bits = 64;
+  const name = `${signed ? '' : 'unsigned '}${bits === 64 ? 'long long' : 'int'}`;
+  return {
+    k: 'num', v: bits === 64 ? x : Number(x), t: text,
+    ty: { kind: 'int', bits: bits, signed: signed, name: name, bytes: bits / 8 },
+  };
+}
+
+/* ---- 语法：递归下降，一层一个优先级 ---- */
+const BIN_LEVELS = [
+  ['||'], ['&&'], ['|'], ['^'], ['&'],
+  ['==', '!='], ['<', '<=', '>', '>='], ['<<', '>>'], ['+', '-'], ['*', '/', '%'],
+];
+const CAST_WORDS = { int: 1, long: 1, short: 1, char: 1, signed: 1, unsigned: 1, float: 1, double: 1, bool: 1, _bool: 1 };
+const CAST_TY = {
+  'bool': E_BOOL,
+  '_bool': { kind: 'bool', bits: 8, signed: false, name: '_Bool', bytes: 1 },
+  'char': E_CHR,
+  'signed char': { kind: 'int', bits: 8, signed: true, name: 'signed char', bytes: 1 },
+  'unsigned char': { kind: 'int', bits: 8, signed: false, name: 'unsigned char', bytes: 1 },
+  'short': E_SHORT, 'short int': E_SHORT, 'signed short': E_SHORT, 'signed short int': E_SHORT,
+  'unsigned short': E_USHORT, 'unsigned short int': E_USHORT,
+  'int': E_INT, 'signed int': E_INT, 'signed': E_INT,
+  'unsigned int': E_UINT, 'unsigned': E_UINT,
+  /* wasm32：long 和 int 同宽，unsigned long 同理 */
+  'long': E_INT, 'long int': E_INT, 'signed long': E_INT, 'signed long int': E_INT,
+  'unsigned long': E_UINT, 'unsigned long int': E_UINT,
+  'long long': E_LLONG, 'long long int': E_LLONG, 'signed long long': E_LLONG,
+  'unsigned long long': E_ULLONG,
+  'float': E_FLOAT, 'double': E_DOUBLE,
+};
+
+function isOpAt(p, ops) {
+  const t = p.tk[p.i];
+  return !!t && t.k === 'op' && ops.indexOf(t.v) >= 0;
+}
+function expectOp(p, o) {
+  if (!isOpAt(p, [o])) throw exprErr(`表达式里这里该有 ${o}`);
+  p.i++;
+}
+
+function parseLevel(p, lv) {
+  if (lv >= BIN_LEVELS.length) return parseUnary(p);
+  let l = parseLevel(p, lv + 1);
+  while (isOpAt(p, BIN_LEVELS[lv])) {
+    const o = p.tk[p.i++].v;
+    l = { k: 'bin', o: o, l: l, r: parseLevel(p, lv + 1) };
+  }
+  return l;
+}
+
+function parseTernary(p) {
+  const c = parseLevel(p, 0);
+  if (!isOpAt(p, ['?'])) return c;
+  p.i++;
+  const a = parseTernary(p);
+  expectOp(p, ':');
+  return { k: 'tern', c: c, a: a, b: parseTernary(p) };
+}
+
+function parseUnary(p) {
+  if (isOpAt(p, ['-', '+', '!', '~', '*', '&'])) {
+    const o = p.tk[p.i++].v;
+    return { k: 'un', o: o, a: parseUnary(p) };
+  }
+  if (isOpAt(p, ['++', '--'])) throw exprErr('++/-- 要写内存，观察窗只读不写，别放进表达式');
+  if (isOpAt(p, ['(']) && looksLikeCast(p)) return parseCast(p);
+  return parsePostfix(p);
+}
+
+/* (int) x 和 (a + b) 都以 ( 开头，靠括号里是不是清一色的类型关键字区分 */
+function looksLikeCast(p) {
+  let i = p.i + 1;
+  let n = 0;
+  while (p.tk[i] && p.tk[i].k === 'id' && CAST_WORDS[p.tk[i].v.toLowerCase()]) { ++n; i += 1; }
+  if (!n) return false;
+  if (!(p.tk[i] && p.tk[i].k === 'op' && p.tk[i].v === ')')) return false;
+  const key = p.tk.slice(p.i + 1, p.i + 1 + n).map((t) => t.v.toLowerCase()).join(' ');
+  return !!CAST_TY[key];
+}
+
+function parseCast(p) {
+  p.i++;
+  const words = [];
+  while (p.tk[p.i] && p.tk[p.i].k === 'id' && CAST_WORDS[p.tk[p.i].v.toLowerCase()]) {
+    words.push(p.tk[p.i++].v.toLowerCase());
+  }
+  expectOp(p, ')');
+  const ty = CAST_TY[words.join(' ')];
+  return { k: 'cast', ty: ty, a: parseUnary(p) };
+}
+
+function parsePostfix(p) {
+  let a = parsePrimary(p);
+  for (;;) {
+    if (isOpAt(p, ['['])) {
+      p.i++;
+      const i = parseTernary(p);
+      expectOp(p, ']');
+      a = { k: 'idx', a: a, i: i };
+      continue;
+    }
+    if (isOpAt(p, ['.', '->'])) throw exprErr('成员访问（. 和 ->）不在本期范围：结构体/类的字段还读不到');
+    if (isOpAt(p, ['('])) throw exprErr('函数调用不参与求值：观察窗只读内存，不执行代码（v.size() 这类得先把它存进一个变量再观察）');
+    if (isOpAt(p, ['++', '--'])) throw exprErr('++/-- 要写内存，观察窗只读不写，别放进表达式');
+    return a;
+  }
+}
+
+function parsePrimary(p) {
+  const t = p.tk[p.i];
+  if (!t) throw exprErr('表达式不完整，后面还缺东西');
+  if (t.k === 'num') { p.i++; return { k: 'lit', ty: t.ty, v: t.v }; }
+  if (t.k === 'id') {
+    p.i++;
+    const low = t.v.toLowerCase();
+    if (t.v === 'true' || t.v === 'false') {
+      return { k: 'lit', ty: CAST_TY.bool, v: t.v === 'true' ? 1 : 0 };
+    }
+    if (t.v === 'nullptr' || t.v === 'NULL') {
+      return { k: 'lit', ty: { kind: 'ptr', bits: 32, signed: false, name: 'nullptr', bytes: 4, pt: { kind: 'unknown', name: 'void', bytes: 0 } }, v: 0 };
+    }
+    if (low === 'sizeof') throw exprErr('sizeof 不参与求值（它是编译期就算好的）');
+    return { k: 'id', n: t.v };
+  }
+  if (t.k === 'op' && t.v === '(') {
+    p.i++;
+    const e = parseTernary(p);
+    expectOp(p, ')');
+    return e;
+  }
+  if (t.k === 'op' && (t.v === ';' || t.v === ',')) throw exprErr('观察窗一次只算一个表达式，别写分号或逗号');
+  throw exprErr(`这里该有一个数、变量名或 ( ，看到的是 ${t.t}`);
+}
+
+function parseExprSrc(src) {
+  const p = { tk: tokenizeExpr(src), i: 0 };
+  if (!p.tk.length) throw exprErr('表达式是空的');
+  const e = parseTernary(p);
+  if (p.i < p.tk.length) throw exprErr(`${p.tk[p.i].t} 这里连不上下文`);
+  return e;
+}
+
+/* 语法很便宜，但每个 tick 都要重算 24 行，还是缓存一下。
+   键是表达式文本，值要么是 AST 要么是「这句式子哪儿不对」。 */
+const astCache = new Map();
+function parseWatch(src) {
+  const hit = astCache.get(src);
+  if (hit) return hit;
+  let r;
+  try { r = { ast: parseExprSrc(src) }; }
+  catch (e) { r = { err: e.expr ? e.message : `解析失败：${e.message}` }; }
+  if (astCache.size > 128) astCache.clear();
+  astCache.set(src, r);
+  return r;
+}
+
+/* ---- 语义 ---- */
+const isPtr = (t) => !!t && t.kind === 'ptr';
+const isFlt = (t) => !!t && t.kind === 'float';
+const isInt = (t) => !!t && (t.kind === 'int' || t.kind === 'bool');
+
+/* 参与算术时 bool / char 一律先升到整数（C++ 的整型提升），位宽留给类型判断 */
+function numTy(t) {
+  if (t.kind === 'bool') return { kind: 'int', bits: 8, signed: true, name: t.name, bytes: 1 };
+  return t;
+}
+
+/* 常规算术转换：有浮点就升到最宽的那个浮点，否则整数按最宽位走；
+   32 位以下统一升到 int（wasm32 上 int 是 32 位），一方无符号结果就无符号。 */
+function arithTy(a, b) {
+  a = numTy(a); b = numTy(b);
+  if (isFlt(a) || isFlt(b)) {
+    const bits = Math.max(isFlt(a) ? a.bits : 0, isFlt(b) ? b.bits : 0) || 64;
+    return { kind: 'float', bits: bits, signed: true, name: bits === 64 ? 'double' : 'float', bytes: bits / 8 };
+  }
+  const bits = Math.max(32, a.bits || 32, b.bits || 32);
+  const signed = a.signed !== false && b.signed !== false;
+  return {
+    kind: 'int', bits: bits, signed: signed, bytes: bits / 8,
+    name: `${signed ? '' : 'unsigned '}${bits === 64 ? 'long long' : 'int'}`,
+  };
+}
+
+/* 值收成目标类型：整数走 BigInt 截断，浮点原样，bool 只看非零 */
+function toTyBig(t, x) {
+  if (typeof x !== 'bigint') x = BigInt(Math.trunc(Number(x)));
+  const bits = BigInt(t.bits || 32);
+  x &= (1n << bits) - 1n;
+  if (t.signed && ((x >> (bits - 1n)) & 1n) === 1n) x -= (1n << bits);
+  return x;
+}
+function intRes(t, x) {
+  return { ty: t, val: t.bits >= 64 ? x : Number(x) };
+}
+const TRUE_RES = { ty: E_INT, val: 1 };
+const FALSE_RES = { ty: E_INT, val: 0 };
+function cmpRes(ok) { return ok ? TRUE_RES : FALSE_RES; }
+
+function truthy(r) {
+  const v = r.val;
+  if (typeof v === 'bigint') return v !== 0n;
+  return v !== 0;
+}
+
+/* 结果值写成一行。数组（a[i] 落在多维数组上剩下的那一行也是数组）铺开给
+   limit 个，字符数组走字符串那条路（strLimit），其它类型走 showVal ——
+   和悬停完全同一套格式化。 */
+function showRes(r, limit, strLimit) {
+  if (r.ty.kind === 'arr') {
+    if (r.addr === undefined) throw exprErr('这个数组值没有地址，读不出元素');
+    const n = dimProd(r.ty.dims);
+    return { ty: r.ty.name, text: cellsText(r.addr, r.ty.elem, n, limit, strLimit) };
+  }
+  if (r.addr !== undefined) {
+    const x = readAt(r.addr, r.ty);
+    if (x === null) throw exprErr(`地址 0x${(r.addr >>> 0).toString(16)} 上读不出 ${r.ty.name}：越界，或者这个类型的宽度还不认`);
+    return { ty: r.ty.name, text: showVal(r.ty, x) };
+  }
+  return { ty: r.ty.name, text: showVal(r.ty, r.val) };
+}
+
+function dimProd(dims) {
+  let p = 1;
+  for (const d of dims || []) p *= (d > 0 ? d : 0);
+  return p;
+}
+
+/* 数组出现在要值的地方就是首元素地址（衰减）；带地址的标量按地址读；
+   已经有值的原样返回。 */
+function rvalue(r) {
+  if (r.val !== undefined) return r;         /* 标量通道已经把这个变量的此刻值报给我们了 */
+  if (r.ty.kind === 'arr') {
+    const e = r.ty.elem;
+    return {
+      ty: { kind: 'ptr', bits: 32, signed: false, name: (e.name || '?') + '*', bytes: 4, pt: e },
+      val: r.addr >>> 0,
+    };
+  }
+  const x = readAt(r.addr, r.ty);
+  if (x === null) throw exprErr(`地址 0x${(r.addr >>> 0).toString(16)} 上读不出 ${r.ty.name}：越界，或者这个类型的宽度还不认`);
+  return { ty: r.ty, val: x };
+}
+
+/* 二元运算里数组先衰减成指针（a + 1 是加一个元素，不是把首地址当成数加） */
+function decay(r) {
+  return r.ty.kind === 'arr' ? rvalue(r) : r;
+}
+
+/* 变量名 -> 左值/右值。值走标量通道（val 槽），数组和「不在当前行名单里」的
+   变量走地址通道（arr 槽），指针的「指向什么」从插桩带回来的 pt 链上取。
+   ctx.stale 是一句话，不是个布尔：名单外按地址读的是这一行的真值，只是不属于
+   当前作用域；只有退回标量通道那份缓存的才是旧值。 */
+function varValue(name, ctx) {
+  const hit = pickVar(name, ctx.line);
+  if (!hit) throw exprErr(`没有 ${name}：本次构建的变量表里找不到它（全局变量不在表里，别的函数里的同名变量也不算）`);
+  const v = hit.v;
+  const ty = varTy(v);
+  if (v.kind === 'obj' || v.kind === 'unknown') throw exprErr(`${name} 的类型是 ${ty.name}，结构体/类/未知类型本期读不了`);
+  const cb = ctx.cb;
+  if (!cb) throw exprErr(`${name} 还没有快照：会话没开始`);
+  const snap = () => ({
+    ty: ty, val: numFromBits(ty, cb.val[v.id * 2], cb.val[v.id * 2 + 1]), addr: cb.arr[v.id * DBG.ARR_W] | 0,
+  });
+  /* 一句提示只报第一个数不上名字的表达式，多个变量在外名单里时说不清是哪个 */
+  const offList = () => { if (!ctx.stale) ctx.stale = `（${name} 不在当前行的快照名单里，按登记的地址读）`; };
+  const base = v.id * DBG.ARR_W;
+  const addr = cb.arr[base] | 0;
+  if (v.kind === 'arr') {
+    if (!addr || !cb.arr[base + 2]) throw exprErr(`${name} 当前行没有快照（这一行还没执行到它的声明）`);
+    if (!hit.live) offList();
+    return { ty: ty, addr: addr };
+  }
+  if (hit.live && cb.wr[v.id]) return snap();
+  /* 没进这一行的快照名单，但插桩登记过它的栈槽地址 —— 直接读内存，
+     拿到的还是这一行的真值（函数返回后同一个槽会被复用，这点和真实调试器一样）。 */
+  if (addr) {
+    if (!hit.live) offList();
+    return { ty: ty, addr: addr };
+  }
+  /* 标量通道写过它（值本来就在 SSA 寄存器里的形参没地址，只有这一条路） */
+  if (cb.wr[v.id]) {
+    if (!ctx.stale) ctx.stale = `（${name} 当前行没快照到，是旧值）`;
+    return snap();
+  }
+  throw exprErr(`${name} 当前行没有快照（这一行还没执行到它的声明）`);
+}
+
+/* X[i]：数组按 dims 走（多维数组一步跨的是「剩下那些维的乘积」个元素），
+   指针按被指向类型的大小走。base 不能先衰减成指针，否则多维就退化成一步 4 字节。 */
+function evalIdx(base, idxNode, ctx) {
+  const k = rvalue(evalNode(idxNode, ctx));
+  if (!isInt(k.ty)) throw exprErr('下标得是整数');
+  const kn = typeof k.val === 'bigint' ? Number(k.val) : k.val;
+  if (!Number.isInteger(kn)) throw exprErr('下标得是整数');
+  if (base.ty.kind === 'arr') {
+    const dims = base.ty.dims || [];
+    if (!dims.length || dims[0] <= 0) throw exprErr(`${base.ty.name} 的每一维长度未知，算不了下标`);
+    const stride = dimProd(dims.slice(1)) * base.ty.elem.bytes;
+    if (!stride) throw exprErr(`${base.ty.name} 的元素宽度不认识，算不了下标`);
+    const rest = dims.slice(1);
+    const ty = rest.length
+      ? { kind: 'arr', name: base.ty.elem.name + rest.map((d) => `[${d}]`).join(''), elem: base.ty.elem, dims: rest, bytes: base.ty.elem.bytes }
+      : base.ty.elem;
+    return { ty: ty, addr: base.addr + kn * stride };
+  }
+  if (isPtr(base.ty)) {
+    const bytes = ptrStride(base.ty);
+    if (!bytes) throw exprErr(`${base.ty.name} 指向的类型不知道宽度（void* / 结构体指针），算不了下标`);
+    return { ty: base.ty.pt, addr: ((rvalue(base).val >>> 0) + kn * bytes) >>> 0 };
+  }
+  throw exprErr(`${base.ty.name} 不能取下标：[] 只用在数组和指针上`);
+}
+
+function evalUn(n, ctx) {
+  if (n.o === '*') {
+    const r = rvalue(evalNode(n.a, ctx));
+    if (!isPtr(r.ty)) throw exprErr(`* 只能解引用指针，这里是 ${r.ty.name}`);
+    if (!r.ty.pt || !r.ty.pt.bytes) throw exprErr(`${r.ty.name} 指向的类型不知道宽度（void* / 结构体指针），读不出值`);
+    return { ty: r.ty.pt, addr: r.val >>> 0 };
+  }
+  if (n.o === '&') {
+    const r = evalNode(n.a, ctx);
+    if (r.addr === undefined) throw exprErr('& 只能取变量、数组元素这类“住在内存里”的东西的地址，临时算出来的值没有地址');
+    return ptrRes(r.ty, r.addr);
+  }
+  const r = rvalue(evalNode(n.a, ctx));
+  const x = r.val;
+  if (n.o === '!') return cmpRes(!truthy(r));
+  if (r.ty.kind === 'bool') {
+    /* 一元 + - 作用在 bool 上按整型提升算 */
+    const b = numTy(r.ty);
+    return evalUnInt(n.o, toTyBig(b, x), b);
+  }
+  if (isFlt(r.ty)) {
+    if (n.o === '-') return { ty: r.ty, val: -x };
+    if (n.o === '+') return { ty: r.ty, val: x };
+    throw exprErr(`${n.o} 用不了在 ${r.ty.name} 上`);
+  }
+  if (isInt(r.ty)) return evalUnInt(n.o, toTyBig(r.ty, x), r.ty);
+  throw exprErr(`${n.o} 用不了在 ${r.ty.name} 上`);
+}
+
+function ptrRes(t, addr) {
+  return {
+    ty: { kind: 'ptr', bits: 32, signed: false, name: (t.name || '?') + '*', bytes: 4, pt: t },
+    val: addr >>> 0,
+  };
+}
+
+function evalUnInt(o, x, ty) {
+  if (o === '-') return intRes(ty, toTyBig(ty, -x));
+  if (o === '+') return intRes(ty, x);
+  if (o === '~') return intRes(ty, toTyBig(ty, ~x));
+  if (o === '!') return cmpRes(x === 0n);
+  throw exprErr(`${o} 用不了在 ${ty.name} 上`);
+}
+
+function evalBin(n, ctx) {
+  const o = n.o;
+  if (o === '&&') return truthy(rvalue(evalNode(n.l, ctx))) ? cmpRes(truthy(rvalue(evalNode(n.r, ctx)))) : FALSE_RES;
+  if (o === '||') return truthy(rvalue(evalNode(n.l, ctx))) ? TRUE_RES : cmpRes(truthy(rvalue(evalNode(n.r, ctx))));
+
+  const L = decay(evalNode(n.l, ctx));
+  const R = decay(evalNode(n.r, ctx));
+
+  /* 指针参与的运算：p+i / p-i（步长是被指向类型的大小）、p-q（给元素个数差）、
+     指针之间的比较。数组已经先 decay 成指针了，所以这里只看 isPtr。 */
+  const lp = isPtr(L.ty);
+  const rp = isPtr(R.ty);
+  if (lp && isInt(R.ty) && (o === '+' || o === '-')) {
+    return ptrOffset(L, R, o);
+  }
+  if (rp && isInt(L.ty) && (o === '+' || o === '-')) {
+    return ptrOffset(R, L, o);
+  }
+  if (lp && rp) {
+    const lv = rvalue(L).val >>> 0;
+    const rv = rvalue(R).val >>> 0;
+    if (o === '-') {
+      const bytes = ptrStride(L.ty);
+      if (!bytes) throw exprErr(`${L.ty.name} 指向的类型不知道宽度，算不出两个指针相差几个元素`);
+      return intRes(E_INT, BigInt(Math.trunc((lv - rv) / bytes)));
+    }
+    return cmpRes(ptrCmp(o, lv, rv));
+  }
+  if (lp || rp) throw exprErr(`${lp ? L.ty.name : R.ty.name} 不能这样参与 ${o}：指针只能和整数加减、和同类型指针相减或比较`);
+
+  const a = rvalue(L);
+  const b = rvalue(R);
+  const ty = arithTy(a.ty, b.ty);
+  if (isFlt(ty)) {
+    const x = Number(a.val), y = Number(b.val);
+    switch (o) {
+      case '+': return { ty: ty, val: x + y };
+      case '-': return { ty: ty, val: x - y };
+      case '*': return { ty: ty, val: x * y };
+      case '/': return { ty: ty, val: y === 0 ? (x === 0 ? NaN : (x > 0 ? Infinity : -Infinity)) : x / y };
+      case '<': return cmpRes(x < y);
+      case '<=': return cmpRes(x <= y);
+      case '>': return cmpRes(x > y);
+      case '>=': return cmpRes(x >= y);
+      case '==': return cmpRes(x === y);
+      case '!=': return cmpRes(x !== y);
+      default: throw exprErr(`${ty.name} 不能 ${o}：位运算和取余只能用整数`);
+    }
+  }
+  const x = toTyBig(ty, a.val);
+  const y = toTyBig(ty, b.val);
+  switch (o) {
+    case '+': return intRes(ty, toTyBig(ty, x + y));
+    case '-': return intRes(ty, toTyBig(ty, x - y));
+    case '*': return intRes(ty, toTyBig(ty, x * y));
+    case '/':
+      if (y === 0n) throw exprErr('除以 0：C++ 里这是未定义行为，观察窗不猜结果');
+      return intRes(ty, toTyBig(ty, x / y));
+    case '%':
+      if (y === 0n) throw exprErr('对 0 取余：C++ 里这是未定义行为，观察窗不猜结果');
+      return intRes(ty, toTyBig(ty, x % y));
+    case '&': return intRes(ty, x & y);
+    case '|': return intRes(ty, x | y);
+    case '^': return intRes(ty, x ^ y);
+    case '<<': case '>>': {
+      const c = Number(y);
+      if (!Number.isInteger(c) || c < 0 || c >= ty.bits) {
+        throw exprErr(`移位数 ${y} 超出了 ${ty.name} 的位宽（${ty.bits}），C++ 里这是未定义行为`);
+      }
+      return intRes(ty, o === '<<' ? toTyBig(ty, x << BigInt(c)) : toTyBig(ty, x >> BigInt(c)));
+    }
+    case '<': return cmpRes(x < y);
+    case '<=': return cmpRes(x <= y);
+    case '>': return cmpRes(x > y);
+    case '>=': return cmpRes(x >= y);
+    case '==': return cmpRes(x === y);
+    case '!=': return cmpRes(x !== y);
+    default: throw exprErr(`不认识运算符 ${o}`);
+  }
+}
+
+function ptrCmp(o, x, y) {
+  if (o === '==') return x === y;
+  if (o === '!=') return x !== y;
+  if (o === '<') return x < y;
+  if (o === '<=') return x <= y;
+  if (o === '>') return x > y;
+  if (o === '>=') return x >= y;
+  throw exprErr(`指针不能 ${o}`);
+}
+
+function ptrStride(t) {
+  const pt = t && t.pt;
+  if (!pt) return 0;
+  if (pt.kind === 'arr') return dimProd(pt.dims) * (pt.elem ? pt.elem.bytes : 0);
+  return pt.bytes || 0;
+}
+
+/* 指针 ± 整数：结果还是同类型指针，走的格数就是那个整数 */
+function ptrOffset(P, Q, o) {
+  const pv = rvalue(P);
+  const qv = rvalue(Q);
+  const bytes = ptrStride(pv.ty);
+  if (!bytes) throw exprErr(`${pv.ty.name} 指向的类型不知道宽度（void* / 结构体指针），加减不了`);
+  const k = typeof qv.val === 'bigint' ? Number(qv.val) : qv.val;
+  if (!Number.isInteger(k)) throw exprErr('指针的偏移得是整数');
+  return { ty: pv.ty, val: ((pv.val >>> 0) + (o === '+' ? k : -k) * bytes) >>> 0 };
+}
+
+function evalCast(n, ctx) {
+  const ty = n.ty;
+  const r = rvalue(evalNode(n.a, ctx));
+  const src = numTy(r.ty);
+  if (ty.kind === 'bool') return { ty: ty, val: truthy(r) ? 1 : 0 };
+  if (isPtr(ty)) {
+    if (isPtr(src)) return { ty: Object.assign({}, ty, { pt: src.pt }), val: r.val >>> 0 };
+    if (isInt(src)) return { ty: ty, val: Number(toTyBig(E_UINT, r.val)) >>> 0 };
+    throw exprErr(`${r.ty.name} 转不成 ${ty.name}`);
+  }
+  if (isPtr(src)) {
+    if (!isInt(ty)) throw exprErr('指针只能转成整数，比如 (int)(p - q)');
+    return intRes(ty, toTyBig(ty, BigInt(r.val >>> 0)));
+  }
+  if (isFlt(ty)) {
+    if (!isInt(src) && !isFlt(src)) throw exprErr(`${r.ty.name} 转不成 ${ty.name}`);
+    return { ty: ty, val: typeof r.val === 'bigint' ? Number(r.val) : Number(r.val) };
+  }
+  if (isInt(ty)) {
+    if (isFlt(src)) {
+      if (!Number.isFinite(r.val)) throw exprErr(`${r.val} 转成 ${ty.name} 在 C++ 里是未定义行为，观察窗不猜结果`);
+      return intRes(ty, toTyBig(ty, BigInt(Math.trunc(r.val))));
+    }
+    if (!isInt(src)) throw exprErr(`${r.ty.name} 转不成 ${ty.name}`);
+    return intRes(ty, toTyBig(ty, r.val));
+  }
+  throw exprErr(`不支持转成 ${ty.name}`);
+}
+
+function evalNode(n, ctx) {
+  switch (n.k) {
+    case 'lit': return { ty: n.ty, val: n.v };
+    case 'id': return varValue(n.n, ctx);
+    case 'un': return evalUn(n, ctx);
+    case 'bin': return evalBin(n, ctx);
+    case 'cast': return evalCast(n, ctx);
+    case 'idx': return evalIdx(evalNode(n.a, ctx), n.i, ctx);
+    case 'tern': return truthy(rvalue(evalNode(n.c, ctx))) ? evalNode(n.a, ctx) : evalNode(n.b, ctx);
+    default: throw exprErr('表达式里有不支持的写法');
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 观察窗（watch）                                                     */
+/*                                                                    */
+/* 悬停一次只能看一个名字，可循环里的循环变量、每轮都在改的数组、正在   */
+/* 比较的那对元素是要一直盯着的。这里收的是表达式：a[i]、a[10]、*p、    */
+/* pp[0][1]、i<n-1 && a[j]>a[j+1] 都行，求值走上面那一节。名单记进      */
+/* localStorage，每次调试会话复用。                                    */
+/*                                                                    */
+/* 停在某行时看到的是「这一行开始前」的状态 —— 和悬停完全同一套数据：   */
+/* 标量取快照的 val，数组和指针按登记的栈槽地址直接读共享内存。         */
+/*                                                                    */
+/* 数组在面板里只铺开前 8 个 —— 一行高度放 50 个就把别的行顶出视野了， */
+/* 要看全的把鼠标放到源码里的变量名上（tooltip 给前 50 个）。           */
+/* ------------------------------------------------------------------ */
+const WATCH_KEY = 'cpp-playground.watch';
+const WATCH_MAX = 24;
+const WATCH_ARR_N = 8;
+const WATCH_LEN = 80;
+
+const watchEl = {
+  list: $('wlist'), input: $('watch-add'), names: $('watch-names'), tip: $('watchtip'),
+};
+/* 表达式 -> {row, ty, val}；只在名单变化时重建 */
+const watchRows = new Map();
+const watchItems = loadWatch();
+
+function loadWatch() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WATCH_KEY) || '[]');
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const s of raw) {
+      if (typeof s !== 'string') continue;
+      const t = s.trim();
+      if (t && t.length <= WATCH_LEN && out.indexOf(t) < 0) out.push(t);
+      if (out.length >= WATCH_MAX) break;
+    }
+    return out;
+  } catch (e) { return []; }
+}
+function saveWatch() {
+  try { localStorage.setItem(WATCH_KEY, JSON.stringify(watchItems)); } catch (e) {}
+}
+
+/* 名字 -> 变量描述。优先要「当前行快照过的那个」：同名有多个 alloca（两个
+   for (int i...)、或者别的函数里的同名变量）时，只有这一行活着的那个才是
+   人想看的东西。当前行没有它才退回全表按声明行挑最靠后的一个，那种情况下
+   值八成是旧的，面板上会标出来。 */
+function pickVar(name, line) {
+  const live = liveVarsAt(line).get(name);
+  if (live) return { v: live, live: true };
+  let best = null;
+  for (const v of dbg.vars || []) {
+    if (v.name !== name) continue;
+    if (!best || (v.line || 0) >= (best.line || 0)) best = v;
+  }
+  return best ? { v: best, live: false } : null;
+}
+
+/* 一行观察结果：表达式 -> {类型, 值, 状态}。
+   会话没开始、式子写错、式子对的但这一行拿不到值，三种情况分开说 —— 面板上
+   留着的永远是「这一行开始前」的状态，跟悬停同一个口径。 */
+function watchValue(expr, line) {
+  if (!dbg.active || !dbg.cb) return { ty: '—', val: '会话未开始', cls: 'idle' };
+  const p = parseWatch(expr);
+  if (p.err) return { ty: '—', val: p.err, cls: 'off' };
+  const ctx = { line: line, cb: dbg.cb, stale: '' };
+  try {
+    const r = showRes(evalNode(p.ast, ctx), WATCH_ARR_N, STR_WATCH_N);
+    return {
+      ty: r.ty,
+      val: r.text + ctx.stale,
+      cls: ctx.stale ? 'stale' : '',
+    };
+  } catch (e) {
+    if (e.expr) return { ty: '—', val: e.message, cls: 'off' };
+    return { ty: '—', val: `求值出错：${e.message}`, cls: 'off' };
+  }
+}
+
+function buildWatchRows() {
+  for (const r of watchRows.values()) r.row.remove();
+  watchRows.clear();
+  for (const expr of watchItems) {
+    const row = document.createElement('div');
+    row.className = 'wrow';
+    const n = document.createElement('span');
+    n.className = 'wn'; n.textContent = expr;
+    /* 表达式长了面板会截断（CSS 里 max-width + ellipsis），完整的一句挂在 title 上 */
+    n.title = expr;
+    const ty = document.createElement('span');
+    ty.className = 'wt'; ty.textContent = '—';
+    const val = document.createElement('span');
+    val.className = 'wv'; val.textContent = '会话未开始';
+    const x = document.createElement('button');
+    x.className = 'wx mini secondary'; x.type = 'button';
+    x.title = `不再观察 ${expr}`; x.textContent = '×';
+    x.onclick = () => {
+      watchItems.splice(watchItems.indexOf(expr), 1);
+      saveWatch(); buildWatchRows(); refreshWatch();
+    };
+    row.append(n, ty, val, x);
+    watchEl.list.appendChild(row);
+    watchRows.set(expr, { row: row, ty: ty, val: val });
+  }
+  watchEl.list.classList.toggle('empty', !watchItems.length);
+}
+
+function refreshWatch() {
+  if (!watchItems.length) return;
+  const line = dbg.active && dbg.ctl ? dbg.ctl[DBG.S.LINE] : 0;
+  for (const expr of watchItems) {
+    const r = watchRows.get(expr);
+    if (!r) continue;
+    const o = watchValue(expr, line);
+    r.ty.textContent = o.ty;
+    r.val.textContent = o.val;
+    r.row.className = 'wrow' + (o.cls ? ' ' + o.cls : '');
+  }
+}
+
+/* 加完把提示写清楚。还没做过插桩构建时别乱报「构建里没有它」——
+   那时变量表压根还是空的。表达式里挑出标识符逐个查名字，查得到的个数
+   直接报出来，省得「a[i]」和「a[q]]」这种混在一句提示里看不出区别。 */
+function exprIdents(ast) {
+  const out = [];
+  (function walk(n) {
+    if (!n || typeof n !== 'object') return;
+    if (n.k === 'id') { out.push(n.n); return; }
+    for (const key of ['l', 'r', 'a', 'b', 'c', 'i']) if (n[key]) walk(n[key]);
+  })(ast);
+  return [...new Set(out)];
+}
+
+function watchHint(expr) {
+  const all = dbg.vars || [];
+  const set = new Set(all.map((v) => v.name));
+  const names = exprIdents(parseWatch(expr).ast || {});
+  const miss = names.filter((n) => !set.has(n));
+  if (!all.length) {
+    watchEl.tip.textContent = `已加入 ${expr}`;
+    watchEl.tip.className = 'wnote';
+    return;
+  }
+  watchEl.tip.textContent = names.length
+    ? (miss.length ? `已加入 ${expr}（本次构建的变量表里还没有 ${miss.join('、')}）` : `已加入 ${expr}`)
+    : `已加入 ${expr}`;
+  watchEl.tip.className = 'wnote' + (names.length && miss.length ? ' warn' : ' ok');
+}
+
+function watchAdd() {
+  const src = watchEl.input.value.trim();
+  if (!src) return;
+  if (src.length > WATCH_LEN) {
+    watchEl.tip.textContent = `一条表达式最多 ${WATCH_LEN} 个字符`;
+    watchEl.tip.className = 'wnote bad';
+    return;
+  }
+  const p = parseWatch(src);
+  if (p.err) {
+    watchEl.tip.textContent = `这句看不懂：${p.err}`;
+    watchEl.tip.className = 'wnote bad';
+    return;
+  }
+  if (!watchItems.includes(src)) {
+    if (watchItems.length >= WATCH_MAX) {
+      watchEl.tip.textContent = `最多同时观察 ${WATCH_MAX} 个`;
+      watchEl.tip.className = 'wnote bad';
+      return;
+    }
+    watchItems.push(src);
+    saveWatch(); buildWatchRows();
+  }
+  watchEl.input.value = '';
+  refreshWatch();
+  watchHint(src);
+}
+
+/* 补全名单：变量表要插桩构建完才有，所以每次产物回来刷一遍。
+   只是名字清单，跨函数的同名会合并成一项。 */
+function fillWatchNames(list) {
+  const set = new Set();
+  for (const v of list || dbg.vars || []) if (v.name) set.add(v.name);
+  watchEl.names.replaceChildren(...[...set].sort().map((s) => {
+    const o = document.createElement('option');
+    o.value = s;
+    return o;
+  }));
+}
+
+/* 新会话开场：把上一轮冻在面板上的值收掉，别让人误读成这一轮的。
+   会话结束（退出 / 跑完 / 停止）时不叫它 —— 最后一次的观测值留着看，
+   跟热力层一个待遇。 */
+function resetWatch() {
+  for (const r of watchRows.values()) {
+    r.ty.textContent = '—';
+    r.val.textContent = '等待执行…';
+    r.row.className = 'wrow idle';
+  }
+}
+
+watchEl.input.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') { ev.preventDefault(); watchAdd(); }
+});
+$('watch-push').onclick = watchAdd;
+$('watch-clear').onclick = () => {
+  watchItems.length = 0;
+  saveWatch(); buildWatchRows();
+  watchEl.tip.textContent = '已清空，名单存在浏览器里，下次调试还在';
+  watchEl.tip.className = 'wnote';
+};
+buildWatchRows();
+
 function dbgStopRun() {
   if (runWorker) { runWorker.terminate(); runWorker = null; }
   clearWatchdog();
@@ -1754,11 +2787,17 @@ async function startDebugSession(built) {
   dbg.cb = cb; dbg.ctl = cb.ctl; dbg.bp = cb.bp; dbg.lines = lines;
   dbg.vars = built.vars || [];
   dbg.lineVars = built.lineVars || {};
+  /* 上一轮的内存先收掉：新会话的 wasm 还没实例化，这时候拿旧 DataView 求值
+     会把「上一次运行留下的字节」当成这一轮的值报出来。运行 Worker 实例化好
+     新模块后会把它的 SharedArrayBuffer 递过来（每次 park 前还会再对一遍）。 */
+  setGuestMemory(null);
   /* 新会话从空热力开始：上一轮的次数留在旧控制块里，行号却是按旧源码编的，
      混着画会指错热点。heat 是新建 SAB 上的一块，天生全 0，不用清。 */
   dbg.heatRows = lines;
   dbg.heatTick = 0;
   clearHeat();
+  fillWatchNames();
+  resetWatch();
   dbg.ctl[DBG.S.DELAY_US] = parseInt(dbgSpeed.value, 10) || 0;
   Atomics.store(dbg.ctl, DBG.S.MODE, DBG.MODE.RUN);
   Atomics.store(dbg.ctl, DBG.S.STATE, DBG.STATE.EXEC);

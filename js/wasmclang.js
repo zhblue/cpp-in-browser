@@ -65,9 +65,13 @@
       this.u32 = new Uint32Array(this.buffer);
     }
 
-    /* wasm 内存 grow 之后旧的 ArrayBuffer 会被 detach，必须重建视图。 */
+    /* wasm 内存 grow 之后必须重建视图。判据只能用「buffer 对象换了」，不能用
+       「旧 buffer 的 byteLength 归零」：普通内存 grow 会把旧的 ArrayBuffer
+       detach 掉（长度变 0，一碰就抛），这条判据够用；可共享内存 grow 是换成一个
+       新的 SharedArrayBuffer，旧的那个既不 detach、长度也永远停在原来那份，
+       继续拿旧视图读写就会静默越界或读到过期内容。 */
     check() {
-      if (this.buffer.byteLength === 0) {
+      if (this.buffer !== this.memory.buffer) {
         this.buffer = this.memory.buffer;
         this.u8 = new Uint8Array(this.buffer);
         this.u32 = new Uint32Array(this.buffer);
@@ -544,9 +548,21 @@
   /* 变量表就是「这一行开始前」的值，和调试器停在行首的语义一致。           */
   /* 顺序很关键：快照必须在 __pg_trace 之前，否则停在行桩里时本行的快照      */
   /* 还没执行，看到的全是上一行的旧值。                                    */
+  /*                                                                    */
+  /* 数组不在这条通道上：一串元素两个 int32 装不下，而且本地数组的值           */
+  /* 根本不在栈槽里 —— 槽本身就是首元素。所以每个有栈槽的变量另外发一条        */
+  /* call @__pg_addr(id, 首地址, 元素字节数, 元素个数)：标量是个数 1，本地数组  */
+  /* [30 x i32] 是 30 个 4 字节。宿主只把这三个数记进共享内存的地址表，元素    */
+  /* 本身一个都不搬 —— 用户线性内存本来就是共享的（调试构建链 --shared-memory，*/
+  /* 见 compileForDebug），主线程拿着地址直接读就行。                          */
+  /* 这一条通道是观察窗能算表达式的前提：a[i] 要先有 a 的首地址、p 要先有它存   */
+  /* 的那个地址，才能按类型算出偏移再去读。值留在 SSA 寄存器里的变量（-O0 下按 */
+  /* 值传参才会这样）没有地址可给，就不发；引用也不发，因为槽里存的是被引用对  */
+  /* 象的地址，登记成「这个变量的地址」会把 &r 算错。                          */
   /* ------------------------------------------------------------------ */
   const TRACE_FN = '__pg_trace';
   const VAR_FN = '__pg_var';
+  const ADDR_FN = '__pg_addr';
   const MAX_VAR = 512;      /* 和 js/dbgproto.js 的变量槽数量保持一致 */
 
   /* 元数据字段：键是固定的几个，用字面量正则在模块级建一次
@@ -577,6 +593,32 @@
   const RE_DECLARE =
     /^\s*call void @llvm\.dbg\.declare\(metadata (.+?) (%[-.\w\d]+), metadata !(\d+), metadata !DIExpression\(\)\)/;
 
+  /* LLVM 数组类型 -> 元素个数 + 元素在内存里占几字节 + 每一维的长度。
+     只吃字面量的定长数组：[30 x i32]* 是本地数组的 alloca，[2 x [3 x i32]]*
+     这种多维干脆摊平成 6 个 i32（悬停里看一维序列比看嵌套更直观，实现也短）。
+     dims 要留着：观察窗算 a[i][j] 的扁平下标靠的是 i*3+j，只有一个 6 出不来。
+     字节数按 LLVM 类型的内存布局取，不按 DWARF 的 size 取 —— [10 x i8] 的元素
+     在内存里就是 1 字节，不是 i8 提升后的 4 字节。元素类型不是标量/指针（结构体
+     数组）时返回 null，照旧只报名字。 */
+  const ELEM_BYTES = { i1: 1, i8: 1, i16: 2, i32: 4, i64: 8, float: 4, double: 8 };
+  function arrayShape(lty) {
+    let s = /\*$/.test(lty) ? lty.replace(/\*$/, '') : lty;
+    const dims = [];
+    let count = 1;
+    for (;;) {
+      const m = /^\[\s*(\d+)\s*x\s*(.+?)\s*\]$/.exec(s);
+      if (!m) return null;
+      dims.push(+m[1]);
+      count *= +m[1];
+      s = m[2];
+      if (!/^\[/.test(s) && !(SCALAR_TY.test(s) || /\*$/.test(s))) return null;
+      if (/^\[/.test(s)) continue;
+      const bytes = SCALAR_TY.test(s) ? ELEM_BYTES[s] : 4;
+      if (!bytes) return null;
+      return { count: count, bytes: bytes, elemTy: s, dims: dims };
+    }
+  }
+
   function instrumentIR(irText, userFilename) {
     const lines = irText.split('\n');
 
@@ -606,8 +648,39 @@
 
     /* DWARF 类型元数据 -> 主线程拿来格式化的描述。
        typedef / const / 引用一路顺着 baseType 剥到底，枚举按底层整数类型算，
-       结构体、类、数组归成 obj（只报名字，不发值）。 */
+       结构体、类归成 obj（只报名字，不发值）；数组标成 kind='arr' 并带上最内层
+       元素类型，能不能真发出值还要看后面 arrayShape() 从 alloca 类型上读不读得到长度。 */
     const typeMemo = new Map();
+    /* 一路剥到数组的最内层元素类型（数组的数组、typedef 过的数组都算） */
+    function elemOf(t) {
+      let e = t;
+      for (let i = 0; e && e.kind === 'arr' && e.elem && i < 8; ++i) e = e.elem;
+      return e || { kind: 'unknown', name: '?' };
+    }
+    /* 元素在内存里占几字节：标量按 DWARF 的 size（_Bool 的 size 就是 8 位，
+       不是 i1 那一位），指针在 wasm32 是 4。结构体、未知类型、指向数组的指针
+       一律给 0 —— 求值器看到 0 报「算不了」，比闷头算错强。 */
+    function typeBytes(t) {
+      if (!t) return 0;
+      if (t.kind === 'ptr') return 4;
+      if (t.kind === 'int' || t.kind === 'float' || t.kind === 'bool') {
+        const b = (t.bits || 0) >> 3;
+        return b === 1 || b === 2 || b === 4 || b === 8 ? b : 0;
+      }
+      return 0;
+    }
+    /* 类型描述要结构化克隆给主线程，顺手把字节数算好；指针的 pt 一路往下带，
+       观察窗算 pp[i][j] 就是靠它一层层剥的（限 4 层，够教学用例了）。 */
+    function wireTy(t, depth) {
+      if (!t || depth > 4) return null;
+      const o = {
+        kind: t.kind, bits: t.bits || 0, signed: !!t.signed,
+        name: t.name || '?', bytes: typeBytes(t),
+      };
+      if (t.kind === 'arr' && t.elem) o.elem = wireTy(t.elem, depth + 1);
+      if (t.kind === 'ptr' && t.pt) o.pt = wireTy(t.pt, depth + 1);
+      return o;
+    }
     function resolveType(id, hop) {
       if (!id) return { kind: 'unknown', name: '?' };
       if (typeMemo.has(id)) return typeMemo.get(id);
@@ -634,7 +707,10 @@
           r = { kind: 'unknown', name: nm || '?' };
         }
       } else if (tag === 'DW_TAG_pointer_type') {
-        r = { kind: 'ptr', bits: 32, name: (base ? resolveType(base, hop + 1).name : 'void') + '*' };
+        /* pt 留着：*p / p[i] 能不能算、按几个字节算，全看知不知道被指向的类型。
+           void* 没有 baseType，给个 unknown，求值器会明说「不知道元素类型」。 */
+        const pt = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: 'void' };
+        r = { kind: 'ptr', bits: 32, name: (pt.name || 'void') + '*', pt: pt };
       } else if (tag === 'DW_TAG_typedef') {
         const b = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: '?' };
         r = Object.assign({}, b, { alias: b.name, name: nm || b.name });
@@ -654,7 +730,15 @@
           name: nm || 'enum',
         };
       } else if (tag === 'DW_TAG_array_type') {
-        r = { kind: 'obj', name: (base ? resolveType(base, hop + 1).name : '?') + '[]' };
+        const raw = base ? resolveType(base, hop + 1) : { kind: 'unknown', name: '?' };
+        /* 多维数组一路剥到最内层元素：[2 x [3 x i32]] 当 6 个 int 铺开看，比在
+           tooltip 里再嵌一层括号有用，实现也短（长度由 alloca 的类型相乘得出）。
+           只有标量/指针/布尔元素能展开，结构体数组照旧归 obj。 */
+        const e = elemOf(raw);
+        const dumpable = e.kind === 'int' || e.kind === 'float' || e.kind === 'bool' || e.kind === 'ptr';
+        r = dumpable
+          ? { kind: 'arr', elem: e, name: (e.name || '?') + '[]' }
+          : { kind: 'obj', name: (raw.name || e.name || '?') + '[]' };
       } else if (tag === 'DW_TAG_structure_type' || tag === 'DW_TAG_class_type'
         || tag === 'DW_TAG_union_type') {
         r = { kind: 'obj', name: nm || (tag || '').replace('DW_TAG_', '') };
@@ -713,13 +797,39 @@
         const lm = RE_NUM.line.exec(def);
         const line = lm ? +lm[1] : 0;
         if (!name || !line || vars.length >= MAX_VAR) continue;
-        const t = resolveType(num(def, 'type'), 0);
+        const typeId = num(def, 'type');
+        const t = resolveType(typeId, 0);
         const id = vars.length;
-        vars.push({
+        const rec = {
           id: id, name: name, line: line, fn: fid, lty: lty, val: val,
           kind: t.kind, bits: t.bits || 0, signed: !!t.signed,
           isRef: !!t.isRef, tname: t.name,
-        });
+        };
+        if (t.kind === 'arr') {
+          const sh = arrayShape(lty);
+          const e = t.elem || {};
+          rec.ekind = e.kind || 'unknown';
+          rec.ebits = e.bits || 32;
+          rec.esigned = !!e.signed;
+          rec.ename = e.name || '?';
+          /* 元素自己的字节数：标量数组直接由 ebits 推，指针元素是 4。
+             求值器算 a[i] 的地址靠的是它，不再回 LLVM 类型里翻一遍。 */
+          rec.ebytes = e.kind === 'ptr' ? 4 : ((e.bits || 0) >> 3) || 0;
+          /* 完整的元素类型（带 pt 链）：`int *q[4]` 里 q[0][1] 要往下再剥一层，
+             光靠 ekind/ebits 那几个散字段是断的。wireTy 出来的是结构化克隆安全
+             的普通对象，直接跟着变量表递回主线程。 */
+          rec.et = wireTy(e, 0);
+          rec.acount = sh ? sh.count : 0;
+          rec.abytes = sh ? sh.bytes : 0;
+          rec.adims = sh ? sh.dims : null;
+          /* 类型名带上真实长度：悬停/观察窗里 `a : int[30]` 比 `int[]` 有用，
+             多维写成 int[2][3]，跟源码里的声明对得上 */
+          if (sh) rec.tname = rec.ename + sh.dims.map((d) => '[' + d + ']').join('');
+        } else if (t.kind === 'ptr') {
+          /* 指针带上被指向的类型：*p / p[i] / pp[i][j] 都要按它算字节宽度。 */
+          rec.pt = wireTy(t.pt || null, 0);
+        }
+        vars.push(rec);
         if (!fnVars.has(fid)) fnVars.set(fid, []);
         fnVars.get(fid).push(id);
       }
@@ -734,6 +844,7 @@
     let blockLine = 0;      /* 当前基本块里最后一次插桩的行 */
     let pending = 0;        /* 因为块首必须是 phi 而推迟的插桩行 */
     let usedFlush = false;  /* 是否插过 fflush —— 决定要不要补那条 declare */
+    let usedAddr = false;   /* 是否插过地址快照 —— 决定要不要补 __pg_addr 的 declare */
 
     /* phi / landingpad 这类指令按 LLVM 文本格式必须排在同块其它指令前面，
        插桩只能往后压到第一条普通指令之前。只看操作符位置，避免把
@@ -742,10 +853,37 @@
       /^\s*(?:landingpad|catchpad|cleanuppad|catchswitch|token)\b/.test(s)
       || /=\s*phi\b/.test(s);
 
-    /* 把某个变量的当前值压成两个 i32 交给宿主；取不了值就返回 null。 */
-    function varRecord(v) {
+    /* 把某个变量的当前值压成两个 i32（标量）或一段内存（数组）交给宿主；
+       取不了值就返回 null。 */
+    /* 这个变量在内存里怎么摆：本地数组的 alloca 本身就是首元素（若干个元素），
+       标量和指针是栈槽里放一个值。字节数按 LLVM 类型的内存布局取，不按 DWARF 的
+       size 取。给不出字节数的（结构体、long double、值留在寄存器里的形参）返回
+       null —— 连地址都不发，宁缺毋滥。引用也归 null：槽里存的是被引用对象的地址，
+       把它登记成「这个变量自己的地址」会把 &r 算错。 */
+    function addrShape(v) {
+      if (v.isRef || !/\*$/.test(v.lty)) return null;
+      if (v.kind === 'arr') return v.acount && v.abytes ? { bytes: v.abytes, count: v.acount } : null;
+      const b = ELEM_BYTES[v.lty.replace(/\*$/, '')] || (/\*$/.test(v.lty.replace(/\*$/, '')) ? 4 : 0);
+      return b ? { bytes: b, count: 1 } : null;
+    }
+
+    function varRecord(v, line) {
       if (v.kind === 'obj' || v.kind === 'unknown') return null;
       const code = [];
+      /* 地址通道。本地数组登记 [首元素地址, 元素字节数, 元素个数]（load 一个
+         [30 x i32] 本来也不是合法指令）；标量和指针登记 [栈槽地址, 字节数, 1]。
+         宿主只记这三个数，元素一个都不搬，主线程按地址读共享内存 —— 观察窗算
+         a[i]、&a[i]、*p 的前提就是这条地址。长度从 alloca 的类型里读出来的才有，
+         形参 int a[] 退化成指针槽、长度 unknown，就不发。 */
+      const ab = addrShape(v);
+      if (ab) {
+        const a = `%pga${tmp++}`;
+        code.push(`  ${a} = ptrtoint ${v.lty} ${v.val} to i32`);
+        code.push(`  call void @${ADDR_FN}(i32 ${v.id}, i32 ${a}, i32 ${ab.bytes},`
+          + ` i32 ${ab.count})`);
+        usedAddr = true;
+      }
+      if (v.kind === 'arr') return code;
       const n = tmp++;
       let valTy, valRef;
       if (/\*$/.test(v.lty)) {
@@ -808,9 +946,11 @@
       for (const id of list) {
         const v = vars[id];
         if (v.line > line) continue;
-        const code = varRecord(v);
+        const code = varRecord(v, line);
         if (code) { for (const c of code) out.push(c); }
-        else if (v.kind !== 'obj' && v.kind !== 'unknown') continue;
+        /* obj / unknown / 长度未知的数组：发不出值，但名字要留在名单上，
+           悬停和观察窗好回答「这个名字我认识，只是值给不了」。 */
+        else if (v.kind !== 'obj' && v.kind !== 'unknown' && v.kind !== 'arr') continue;
         if (!ids) ids = [];
         ids.push(id);
       }
@@ -878,6 +1018,7 @@
     out.push('');
     out.push(`declare void @${TRACE_FN}(i32)`);
     if (vars.length) out.push(`declare void @${VAR_FN}(i32, i32, i32)`);
+    if (usedAddr) out.push(`declare void @${ADDR_FN}(i32, i32, i32, i32)`);
     if (usedFlush && !flushAlreadyDeclared) out.push(`declare i32 @fflush(${flushArgTy})`);
 
     const lv = {};
@@ -1058,7 +1199,23 @@
       }
 
       const lld = await this.getModule(o.lld || 'lld.wasm');
-      const lres = await this.link(obj, out, stackSize, lld, ['--allow-undefined']);
+      /* 调试构建链成共享内存：数组展开和观察窗的表达式（a[i]、*p）都要由宿主
+         按地址读用户内存，只有内存是 shared 的，它的 buffer 才是一块
+         SharedArrayBuffer，才跨得到主线程去。普通「编译并运行」不走这里，链的
+         还是私有内存，不受影响（也没有跨源隔离的要求）。
+         代价有两条，都得记着：
+           1) grow 会换成一个新的 SAB，旧对象既不 detach 也不清零 —— 所以
+              Memory.check() 只能按对象身份判断，别改回看 byteLength；
+           2) 共享内存模块只能在跨源隔离的上下文里实例化，而 doDebug() 本来就先
+              查过 dbgSupported()，没有 SAB 根本走不到这一步。
+         --max-memory 只要大于初始内存就行，取栈大小四倍、下限 256 MB、向上对齐
+         到 64 KB 一页（这份 wasm-ld 不认 --import-shared-memory，只能让它自己
+         定义这块共享内存再导出）。 */
+      const shmMax = Math.max(256 * 1024 * 1024, stackSize * 4, 64 * 1024 * 1024);
+      const lres = await this.link(obj, out, stackSize, lld, [
+        '--allow-undefined', '--shared-memory',
+        `--max-memory=${Math.ceil(shmMax / 65536) * 65536}`,
+      ]);
       if (lres.code !== 0 || !this.memfs.hasFile(out)) {
         return { ok: false, phase: 'link', exitCode: lres.code, wasm: null };
       }
