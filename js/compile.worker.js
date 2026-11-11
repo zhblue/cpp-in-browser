@@ -110,7 +110,7 @@ self.onmessage = async (ev) => {
         postMessage({
           type: 'ready',
           initMs: Math.round(performance.now() - t0),
-          sysrootFiles: tc.sysrootFiles,
+          detail: `sysroot 装入 ${tc.sysrootFiles} 个文件`,
         });
         initing = null;
       }).catch((e) => {
@@ -124,7 +124,10 @@ self.onmessage = async (ev) => {
       const t0 = performance.now();
       const debug = !!(m.opts && m.opts.debug);
       tc.setSink(postWrite);
-      postMessage({ type: 'stage', stage: debug ? 'compile-debug' : 'compile' });
+      postMessage({
+        type: 'progress',
+        text: debug ? '调试构建中（出 IR → 插桩 → 目标文件 → 链接）' : '编译中（clang -cc1）',
+      });
       const res = debug
         ? await tc.compileForDebug(m.code, m.opts)
         : await tc.compileAndLink(m.code, m.opts);
@@ -137,8 +140,8 @@ self.onmessage = async (ev) => {
         return;
       }
       postMessage({
-        type: 'result', ok: true, ms, bytes: res.wasm.byteLength,
-        wasm: res.wasm, lines: res.lines || null, debug: debug,
+        type: 'result', ok: true, ms, size: res.wasm.byteLength,
+        artifact: res.wasm.buffer, lines: res.lines || null, debug: debug,
         vars: res.vars || null, lineVars: res.lineVars || null,
       }, [res.wasm.buffer]);
       return;

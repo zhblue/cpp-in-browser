@@ -27,6 +27,8 @@
     --heat-rgb: 226, 60, 46;
   }
   * { box-sizing: border-box; }
+  /* 按语言隐藏的字段/面板用 hidden 属性，这里保证它压得过 .field 之类的 display */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--fg); height: 100vh;
@@ -60,7 +62,7 @@
     border-radius: 5px; padding: 4px 7px; font: 12px/1.4 ui-monospace, Consolas, monospace;
   }
   input[type=number] { width: 80px; }
-  #extra { width: 150px; }
+  #extra { width: 190px; }
   button {
     background: var(--acc); color: var(--btn-fg); border: 0; border-radius: 6px;
     padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -277,6 +279,9 @@
 </header>
 
 <div class="toolbar">
+  <div class="field" title="换一门语言：源码、stdin、观察名单都按语言各存一份，互不覆盖；工具条上这门语言用不着的字段会自动收起来。语言本身在 js/langs.js 里登记，再加一门不用改主流程"><span>语言</span>
+    <select id="lang"></select>
+  </div>
   <div class="field"><span>示例</span><select id="examples"></select></div>
   <div class="field" title="编辑器字号，选完立刻生效并记住；投影演示建议 16 px 以上"><span>字号</span>
     <select id="fontsize">
@@ -289,14 +294,15 @@
       <option value="24">24 px</option>
     </select>
   </div>
-  <div class="field"><span>标准</span>
+  <div class="field" id="f-std"><span>标准</span>
     <select id="std">
+      <option value="c++11">-std=c++11</option>
       <option value="c++14">-std=c++14</option>
       <option value="c++17" selected>-std=c++17</option>
       <option value="c++2a">-std=c++2a (不完整)</option>
     </select>
   </div>
-  <div class="field" title="默认 -O0：跑得快慢不重要，行号和变量快照才可信。调试构建本来就固定 -O0"><span>优化</span>
+  <div class="field" id="f-opt" title="默认 -O0：跑得快慢不重要，行号和变量快照才可信。调试构建本来就固定 -O0"><span>优化</span>
     <select id="opt">
       <option value="0" selected>-O0</option>
       <option value="1">-O1</option>
@@ -304,10 +310,10 @@
       <option value="3">-O3</option>
     </select>
   </div>
-  <div class="field"><span>额外 cc1 参数</span>
-    <input type="text" id="extra" value="-Wall" placeholder="-Wall -Wextra -DNDEBUG">
+  <div class="field" id="f-extra" title="原样拼进 clang -cc1。默认带 -DONLINE_JUDGE，和 HUSTOJ 判题机同一条命令行：代码里 #ifdef ONLINE_JUDGE 的那一支（不 freopen、不打印多余提示）在这儿也走得到。删掉它就切回本地那一支"><span>额外 cc1 参数</span>
+    <input type="text" id="extra" value="-Wall -DONLINE_JUDGE" placeholder="-Wall -Wextra -DNDEBUG">
   </div>
-  <div class="field"><span>栈大小</span>
+  <div class="field" id="f-stack"><span>栈大小</span>
     <select id="stack">
       <option value="1048576">1 MB</option>
       <option value="8388608" selected>8 MB</option>
@@ -317,7 +323,7 @@
   <div class="field" title="只对「编译并运行」生效；「编译并调试」不设超时，跑多久都行，用停止/退出调试结束"><span>运行超时(ms)</span>
     <input type="number" id="timeout" value="5000" min="500" step="500">
   </div>
-  <div class="field" title="点「编译并调试」前就能选好；调试运行每执行一行源码额外停留的时间"><span>每行停留</span>
+  <div class="field" id="f-dbspeed" title="点「编译并调试」前就能选好；调试运行每执行一行源码额外停留的时间"><span>每行停留</span>
     <select id="dbspeed">
       <option value="0">不停（全速）</option>
       <option value="1000000">1 s</option>
@@ -331,7 +337,7 @@
       <option value="1">10⁻⁶ s</option>
     </select>
   </div>
-  <div class="field" title="调试时把当前执行行的个位弹成音符：1=中音 do（C4），2..7 依次 re mi fa sol la si，8/9/0 接着往高八度走（do re mi）。只在「编译并调试」里有声音，普通运行没有行号可跟；全速跑会限流，不是每行一声。取消勾选就静音，选择会记住"><span>BGM</span>
+  <div class="field" id="f-bgm" title="调试时把当前执行行的个位弹成音符：1=中音 do（C4），2..7 依次 re mi fa sol la si，8/9/0 接着往高八度走（do re mi）。只在「编译并调试」里有声音，普通运行没有行号可跟；全速跑会限流，不是每行一声。取消勾选就静音，选择会记住"><span>BGM</span>
     <label><input type="checkbox" id="bgm" checked> 行号个位 → 音符</label>
   </div>
   <div class="grow"></div>
@@ -348,14 +354,14 @@
   <button id="dbg-step">下一行</button>
   <button id="dbg-pause" class="secondary">暂停</button>
   <button id="dbg-quit" class="danger">退出调试</button>
-  <span id="dbghint">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值，数组会展开前 50 个元素（观察窗那一列按自己的宽度尽量铺开，窄了就省略号收尾，永远只占一行高；<b>整段都是可显示文字的 <code>char[]</code> 直接写成 <code>"hello"</code> 这样的字符串，不再一个一个报数</b>）。编辑器下面那条「观察」栏钉住的是表达式，不只变量名：<code>a[i]</code>、<code>a[j+1] &gt; a[j]</code>、<code>m[1][2]</code>、<code>*p</code>、<code>&amp;x</code>、<code>(double)x / n</code> 都跟着每一行刷新（成员访问和函数调用还不行），名单存在浏览器里，下次调试还在；不在当前行快照名单里的名字会标出来。「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试构建固定 -O0，行号才不会被优化打乱；调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选。每执行一行源码，左边那栏的「热力」就把这一行的背景加红一档（按次数取 log2，最重只到不吃字的程度），退出调试后红色保留着，用来找程序里最值得优化的位置；没停住时把鼠标放到红行上能看到确切次数。</span>
+  <span id="dbghint"><span data-lang="cpp">双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值，数组会展开前 50 个元素（观察窗那一列按自己的宽度尽量铺开，窄了就省略号收尾，永远只占一行高；<b>整段都是可显示文字的 <code>char[]</code> 直接写成 <code>"hello"</code> 这样的字符串，不再一个一个报数</b>）。编辑器下面那条「观察」栏钉住的是表达式，不只变量名：<code>a[i]</code>、<code>a[j+1] &gt; a[j]</code>、<code>m[1][2]</code>、<code>*p</code>、<code>&amp;x</code>、<code>(double)x / n</code> 都跟着每一行刷新（成员访问和函数调用还不行），名单存在浏览器里，下次调试还在；不在当前行快照名单里的名字会标出来。调试构建固定 -O0，行号才不会被优化打乱；</span><span data-lang="py" hidden>双击行号或按 Ctrl+B 增删断点；停住时把鼠标放到变量名上能看它的当前值（中文变量名也认）。值是停住那一刻从解释器里递出来的<b>当前帧快照</b>：列表/字典/集合铺开前 50 个元素、嵌套最多 3 层、一个值最多 120 个字符，截断了补一句真实总数（观察窗那一列窄了就省略号收尾，永远只占一行高，整句悬停能看全）；自定义对象摊开自己的字段，<b>绝不调用你写的 <code>__repr__</code></b>。编辑器下面那条「观察」栏本期<b>只钉单个变量名</b>，<code>a[i]</code>、<code>x+1</code> 这类表达式还没做，名单存在浏览器里，下次调试还在；不在这一帧里的名字会标出来。行桩来自 <code>sys.settrace</code>，不改源码，产物和「仅运行」完全同一个；</span>「每行停留」是执行每行源码额外等的时间，默认 0.2 s，嫌慢就选 10⁻¹/10⁻²。调试不设运行超时，暂停和降速的时间也都不计进「运行耗时」；正在运行的行跑出视野时编辑器会自动滚过去。调试依赖 <code>SharedArrayBuffer</code>，只有 <b>https</b> 或本机 <code>http://localhost</code> / <code>127.0.0.1</code> 打开才有，且文档要带 COOP/COEP 响应头；<code>http://公网域名</code> 加满头也拿不到。BGM 把当前执行行的个位弹成音符（1=中音 do，2..7=re mi fa sol la si，8/9/0 往高八度走），不要听就取消勾选。每执行一行源码，左边那栏的「热力」就把这一行的背景加红一档（按次数取 log2，最重只到不吃字的程度），退出调试后红色保留着，用来找程序里最值得优化的位置；没停住时把鼠标放到红行上能看到确切次数。</span>
   <div class="state" id="dbgstate">—</div>
   <div class="grow"></div>
 </div>
 
 <main>
   <div class="pane">
-    <div class="cap"><span>源代码 main.cc（Ctrl+Enter 运行）</span><span id="srclen"></span></div>
+    <div class="cap"><span id="srccap">源代码 main.cc（Ctrl+Enter 运行）</span><span id="srclen"></span></div>
     <div class="heatbar" id="heatbar"
          title="调试运行时按「这一行被执行了多少次」把行背景涂红，越频繁越红。深浅按 log2 分档：1 次最浅，2~3、4~7、8~15、16~31、32~63、64~127、128~255 递增，256 次以上同用最深的红——封顶是为了别让字读不动。次数由每个行桩真实触发累加，不是采样估算。退出调试后红色保留着，方便找热点；改一下源码、重开一次调试，或按这里的「清除」就撤掉。">
       <span class="lab">热力</span>
@@ -367,7 +373,7 @@
       <button id="heat-clear" class="mini secondary">清除</button>
     </div>
     <div id="editor"></div>
-    <div class="watch">
+    <div class="watch" id="watchbox">
       <div class="wbar">
         <span class="lab">观察</span>
         <input type="text" id="watch-add" list="watch-names" placeholder="表达式，如 a[i]、a[j+1] &gt; a[j]" spellcheck="false"
@@ -385,16 +391,16 @@
 
   <div class="pane right">
     <section>
-      <div class="cap"><span>标准输入 stdin</span><span>喂给 cin / getline</span></div>
+      <div class="cap"><span>标准输入 stdin</span><span id="stdinhint">喂给 cin / getline</span></div>
       <textarea id="stdin" spellcheck="false"></textarea>
     </section>
 
     <section class="metrics">
       <div class="cells">
         <div class="cell"><span>退出码</span><b id="m-exit">—</b></div>
-        <div class="cell"><span>编译耗时</span><b id="m-compile">—</b></div>
+        <div class="cell"><span id="lab-compile">编译耗时</span><b id="m-compile">—</b></div>
         <div class="cell"><span>运行耗时</span><b id="m-run">—</b></div>
-        <div class="cell"><span>内存峰值</span><b id="m-mem">—</b></div>
+        <div class="cell"><span id="lab-mem">内存峰值</span><b id="m-mem">—</b></div>
       </div>
       <div class="headline"><span class="dot" id="dot"></span><span id="msg">正在初始化工具链…</span></div>
     </section>
@@ -412,7 +418,7 @@
 <footer>
   <details>
     <summary>已知限制</summary>
-    <ul>
+    <ul data-lang="cpp">
       <li>工具链是 <b>LLVM 8 年代</b>的 clang + libc++（不是 GCC/libstdc++）。<code>&lt;bits/stdc++.h&gt;</code> 由本页在 sysroot 解包后补一个虚拟头实现，清单只收录实测能过的头：<code>&lt;csetjmp&gt;</code> <code>&lt;csignal&gt;</code>、并发头、<code>&lt;filesystem&gt;</code> <code>&lt;regex&gt;</code> 都不在里面。C++20 的 <code>&lt;concepts&gt; &lt;ranges&gt; &lt;format&gt; &lt;coroutine&gt;</code> 不存在。</li>
       <li>文件系统是空的内存 FS：<code>std::filesystem</code> 基本不可用，没有真实磁盘。</li>
       <li><code>std::thread</code> 需要 SharedArrayBuffer + 跨源隔离，而且这份 sysroot 没链 pthread：即使页面开了隔离，多线程也多半停在链接期未定义符号。单线程程序不受影响。</li>
@@ -421,12 +427,26 @@
       <li><code>system()</code>、<code>fork()</code>、管道一类进程 API 不存在。</li>
       <li>调试构建固定 <code>-O0</code>（优化会把语句合并、行边界打乱），并且只给用户自己这份源文件里的行插桩：STL 内部下不了断点。降速的亚毫秒档位是按行累计后取整到 1 ms 睡的，不是单行精确计时。悬停看变量值覆盖 POD（整型、浮点、指针、bool、char）和<b>定长数组</b>（<code>int a[30]</code>、<code>double m[4][4]</code> 这类，元素是标量或指针时铺开前 50 个，多维按行优先摊平；<code>char s[n]</code> 整段都是可显示文字时直接写成 <code>"hello"</code> 一句，按第一个 0 收尾，掺了控制字符或非法 UTF-8 才退回逐个元素报数）；<code>std::string</code>、容器、结构体（以及元素是结构体的数组）只报名字不展开内容，指针也只显示线性内存地址而不追字符串，<code>int a[]</code> 形参和变长数组没有长度信息、同样只显示地址。观察窗收的是表达式，但求值器只读内存、不执行代码：<code>a[i]</code> <code>a[10]</code> <code>m[1][2]</code> <code>*p</code> <code>p[i]</code> <code>&amp;x</code> <code>a+j</code>、四则/比较/逻辑/位运算、三元、类型转换都能算（值由主线程按 <code>__pg_addr</code> 登记的栈槽地址直接读共享内存，和悬停用的是同一份数据）；<b>成员访问</b>（<code>s.x</code>、<code>p-&gt;v</code>）、<b>函数调用</b>（<code>v.size()</code>）、<b>全局变量</b>（插桩只收 <code>llvm.dbg.declare</code> 覆盖的局部变量）、字符串字面量、<code>++/--</code>、<code>sizeof</code> 都算不了，会直接把原因写在那一行。下标越界不检查（C++ 本来也不检查），读到的是相邻内存。变量按「声明行 &le; 当前行」判定可见，块作用域结束后仍可能被列出来，值是它最后一次被写入的那份。条件、循环体、自增全写在同一行的 <code>for</code>，整趟循环只触发行桩一次（热力停在最浅档、按一次「下一行」就走完），循环体另起一行才准。</li>
     </ul>
+    <ul data-lang="py" hidden>
+      <li>解释器是 <b>Pyodide 0.29.5（CPython 3.13.2 编译成 wasm）</b>，只带标准库。<code>numpy</code> <code>pandas</code> 这类第三方包没有打包，<code>import</code> 直接 <code>ModuleNotFoundError</code>；<code>micropip</code> 联网装包这条路本页不启用（全程零服务器，也不该在上课时突然去连 CDN）。</li>
+      <li><b>单步调试走 <code>sys.settrace</code></b>，不改源码：跑的还是语法检查那份字节码，产物和「仅运行」完全同一个。断点、下一行、暂停、继续、热力背景、每行停留、BGM 用的都是和 C++ 同一套共享内存握手。只跟踪用户这份源文件里的帧，标准库内部下不了断点。全速档每 512 行才跨一次 Python→JS 的桥（每行都跨的代价是纯 Python 记账的十倍），所以「暂停」停在攒批的那一行上，不是按下去的那一行。</li>
+      <li><b>变量值是停住时递出来的一份快照</b>：解释器的堆在 Worker 里，主线程按地址读不到，所以停住前把当前帧的 <code>f_locals</code> 格式化成文本递过来，悬停和观察窗用的是同一份。几道闸一起卡着总量：一个值最多 120 个字符（字节串 64 个）、每层最多 50 个元素、嵌套最多 3 层、一帧最多 256 个变量，另有 400 个元素的总预算，所以循环引用和百万元素的列表都只会写到「…」为止，真实总数补在后面。<b>绝不执行用户代码</b>：不调 <code>__repr__</code> / <code>__len__</code> / <code>__iter__</code>，容器只认精确的内建类型，自定义类的实例摊开自己的字段（<code>__dict__</code> 或 <code>__slots__</code>），取不到就写「取不到值」。观察窗本期<b>只收单个变量名</b>：<code>a[i]</code>、<code>x+1</code> 这类表达式要在解释器里 <code>eval()</code> 才算得准，还没做。</li>
+      <li>超时同样靠 <code>worker.terminate()</code>。解释器是常驻的（装一次约 12 MB、一两秒），所以杀掉之后页面会自动重装一份，下一次「运行」照常，不用刷新。</li>
+      <li>文件系统是内存 FS：<code>open()</code> 写出来的东西只活在这一次会话里，刷新即空，没有真实磁盘。</li>
+      <li>递归深度默认 1000。wasm 的调用栈比原生小，<code>sys.setrecursionlimit()</code> 调得太高会先撞上 wasm 栈溢出，而不是优雅的 <code>RecursionError</code>。</li>
+      <li>「解释器堆」那一格量的是整个 CPython 堆（标准库、字节码、用户对象都在里面），不是用户程序的内存峰值，和 C++ 那格不是一个口径。</li>
+      <li>stdin 是一次性喂进去的整段文本，不是真终端：<code>input()</code> 的提示语看得见（读之前会 flush），但没有 tty，<code>getpass</code>、<code>termios</code>、光标控制一类用不了。</li>
+      <li>没有真正的并行：<code>multiprocessing</code> 不可用，<code>threading</code> 也起不了原生线程；<code>socket</code> 不存在，联网只能走浏览器的 <code>fetch</code>（受同源/CORS 限制）。</li>
+    </ul>
   </details>
 </footer>
 
 <script src="vendor/ace/ace.js"></script>
 <script src="vendor/ace/ext-language_tools.js"></script>
 <script src="js/dbgproto.js"></script>
+<script src="js/examples.cpp.js"></script>
+<script src="js/examples.py.js"></script>
+<script src="js/langs.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

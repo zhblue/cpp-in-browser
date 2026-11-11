@@ -11,37 +11,14 @@
 importScripts('wasmclang.js', 'dbgproto.js');
 
 /* 行桩的宿主实现。放在闭包里，避免每次调用都重新取常量。
-   onPark 可选：每次真要停住之前叫一下，让外面把用户内存的 SAB 递出去。 */
+   判定、降速、停走握手都在 dbgproto.js 的共享核心里（Python 的 settrace 桩走的
+   是同一套），这里只负责 wasm 每行过来时报的那三件事：当前行、事件数、热力累加。 */
 function makeTracer(c, onPark) {
-  const S = DBG.S, MODE = DBG.MODE, STATE = DBG.STATE, REASON = DBG.REASON;
-  const MAXL = DBG.MAX_LINE;
-  const ctl = c.ctl, bp = c.bp, heat = c.heat;
+  const S = DBG.S, MAXL = DBG.MAX_LINE;
+  const pace = DBG.makePacer(c);
+  const park = DBG.makeParker(c, onPark);
+  const ctl = c.ctl, heat = c.heat;
   let hits = 0;
-  let debtUs = 0;
-
-  /* 降速：每行欠 d 微秒。攒够 1 毫秒才真睡（Atomics.wait 带超时，睡在
-     FUTEX 这个没人写的槽上），所以 10^-6 秒这种亚毫秒档位是靠累计平均出来
-     的，而不是空转烧 CPU。
-     一次最多睡 50ms：片小一点，用户按「暂停」时下一行很快就能停住，不用先把
-     一整秒的降速睡满。记账按片走，先加计划的片长、醒来再把实际多睡的那点补上，
-     所以 SLOW_MS 始终不小于真正睡着的时长；主线程结束时读它，把这段从「运行耗时」
-     里扣掉。 */
-  function pace() {
-    const d = Atomics.load(ctl, S.DELAY_US);
-    if (d <= 0) return;
-    debtUs += d;
-    while (debtUs >= 1000) {
-      /* 用户按了暂停就别继续睡了，让下一行立刻停住 */
-      if (Atomics.load(ctl, S.MODE) === MODE.PAUSE) return;
-      const ms = Math.min(50, Math.floor(debtUs / 1000));
-      debtUs -= ms * 1000;
-      Atomics.add(ctl, S.SLOW_MS, ms);
-      const s0 = performance.now();
-      Atomics.wait(ctl, S.FUTEX, 0, ms);
-      const over = Math.round(performance.now() - s0) - ms;
-      if (over > 0) Atomics.add(ctl, S.SLOW_MS, over);
-    }
-  }
 
   return function trace(line) {
     ctl[S.LINE] = line;
@@ -52,28 +29,8 @@ function makeTracer(c, onPark) {
        省下的是一次原子操作，全速档每行都要走这里。 */
     if (line >= 0 && line <= MAXL) heat[line] = (heat[line] + 1) | 0;
 
-    const mode = Atomics.load(ctl, S.MODE);
-    const hit = line >= 0 && line <= MAXL && bp[line] === 1;
-    if (mode === MODE.PAUSE || mode === MODE.STEP || hit) {
-      Atomics.store(ctl, S.REASON,
-        hit ? REASON.BP : (mode === MODE.STEP ? REASON.STEP : REASON.PAUSE));
-      /* 停住之前先把用户线性内存那块 SharedArrayBuffer 交给主线程：主线程只在
-         PARK 期间读它（悬停、观察窗的 a[i] 都算），而内存 grow 过之后 buffer 会
-         换成一个新对象，所以这里按对象身份判断，换了才发一次。发在置 PARK 之前，
-         免得主线程已经看见 PARK 了却还没收到新的 SAB。 */
-      if (onPark) onPark();
-      Atomics.store(ctl, S.STATE, STATE.PARK);
-      const p0 = performance.now();
-      while (Atomics.load(ctl, S.STATE) === STATE.PARK) {
-        Atomics.wait(ctl, S.STATE, STATE.PARK);
-      }
-      /* 停在这一行上等人放行多久：主线程报「运行耗时」时要把它扣掉，
-         否则想一步的时间全算进程序的运行时间。 */
-      Atomics.add(ctl, S.PARKED_MS, Math.round(performance.now() - p0));
-      Atomics.store(ctl, S.STATE, STATE.EXEC);
-      Atomics.store(ctl, S.REASON, REASON.NONE);
-      return;
-    }
+    const reason = DBG.stopReason(c, line);
+    if (reason) { park(line, reason); return; }
     pace();
   };
 }
@@ -137,7 +94,7 @@ self.onmessage = async (ev) => {
     await memfs.ready;
     memfs.setStdin(m.stdin ? new Uint8Array(m.stdin) : new Uint8Array(0));
 
-    const module = await WebAssembly.compile(new Uint8Array(m.wasm));
+    const module = await WebAssembly.compile(new Uint8Array(m.artifact));
 
     /* 调试构建的模块会导入 env.__pg_trace / __pg_var / __pg_addr；没给控制块就退化成
        空桩，至少程序还能跑完，不会变成一个看不懂的 LinkError。 */

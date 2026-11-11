@@ -4,9 +4,10 @@ serve.py — 本地静态服务器（file:// 无法加载 Worker 和 wasm，必�
 
     python3 serve.py 8000
 
-assets/ 下的 60 MB 工具链设了长缓存，第二次打开页面基本秒就绪。
+assets/ 下的 60 MB C++ 工具链和 12 MB Pyodide（assets/pyodide/）设了长缓存，第二次打开页面基本秒就绪。
 生产部署请再叠一层 gzip/brotli（实测 gzip -9：clang.wasm 10.5 MB、lld.wasm 6.7 MB、
-sysroot.tar 1.8 MB，合计 60.3 MB -> 19.1 MB）。
+sysroot.tar 1.8 MB，合计 60.3 MB -> 19.1 MB；Python 那边 pyodide.asm.wasm 8.6 MB -> 2.8 MB，
+python_stdlib.zip 已经是 deflate，再压只有 2.42 MB -> 2.38 MB，基本不涨）。
 
 响应里带了 COOP/COEP 两个头，用来开启跨源隔离 —— 单步调试需要 SharedArrayBuffer 和
 Atomics.wait 才能把执行停在某一行上。本页全部资源同源，所以 require-corp 不会挡加载；

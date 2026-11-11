@@ -1,8 +1,10 @@
-# 浏览器里的 C++：cpp-wasm-playground
+# 浏览器里的 C++ 和 Python：cpp-wasm-playground
 
 一个纯前端的 C/C++ 编译运行环境。左边 Ace 编辑器里写 `main.cc`，右边填 stdin，点一下按钮就在浏览器里完成 **clang 编译 → wasm-ld 链接 → 生成新的 wasm 模块 → 执行 → 输出 stdout/stderr**，退出码、编译耗时、运行耗时、内存峰值一起报出来。全程没有后端，没有任何代码上传。另一条路是点「编译并调试」：编译时在 LLVM IR 里插行桩和变量桩，跑起来后可以双击下断点、单步、按 10⁻ⁿ 调速，停住时鼠标悬在变量名上看它的当前值，数组会铺开前 50 个元素（整段都是可显示文字的 `char[]` 直接写成 `"hello"` 一句，不再一个一个报数）；循环变量、每轮都在改的数组这类要一直盯着的东西，可以加进编辑器下方的「观察」窗，每停一行刷一次，数组按那一列的宽度尽量铺开。标题可点击跳转到项目主页（新标签页打开，不打断当前编译状态），工具链体积等说明文字收在标题的悬停 tips 里；标题右侧一个「白天」复选框切换深 / 浅配色，连代码编辑器的语法主题一起换（夜晚 `one_dark` / 白天 `tomorrow`），选择记在 `localStorage`，下次进来沿用。
 
 实现方式是 **clang 和 lld 自己被编译成 WebAssembly**，在页面的 Worker 里当"宿主程序"跑，而不是把 g++ 搬进浏览器。g++ 搬不进来的原因是结构性的：它依赖 GCC 内部库和 configure 阶段对宿主环境的一堆探测结果，这些东西在 wasm 里复现不了；本项目的工具链整体来自 LLVM。
+
+工具条最左边是一个**语言**下拉框，目前两项：`C++`（clang.wasm 现场编译链接）和 `Python`（自托管的 Pyodide 解释器）。加 Python 不只是为了多一门语言，更重要的是把主流程改成**只认一张语言登记表**（`js/langs.js`）：按钮文案、工具条哪些字段该显示、示例集、诊断阶段叫什么、产物怎么交给运行侧、能不能单步调试、超时那句怎么说，全部从登记表读，`main.js` 里不再留 C++ 专有的硬编码。加第三门语言的代价因此是「一个编译 worker（解释器型可以编译运行合一）+ 一份示例集 + 登记表里加一项」，而不是把页面重写一遍。详见下面「多语言与扩展点」和「Python 支持做到哪一步」。
 
 ## 快速开始
 
@@ -16,31 +18,34 @@ python3 serve.py 8765
 
 然后打开 <http://127.0.0.1:8765/index.html>，等状态栏从"正在初始化工具链…"变成绿点的"工具链就绪"。首次要下载约 60 MB 工具链（页头写的 58 MB 是按 MiB 算的同一个数），就绪耗时页面自己会报在那行里（实测 HTTP 缓存和浏览器 wasm 代码缓存都命中时是 0.1 秒，冷启动主要耗在下载上）。之后 `assets/` 和 `vendor/` 走一年长缓存，再开基本秒就绪。
 
+下拉框切到 `Python` 是另一条独立的装载路径：首次约 12 MB（`pyodide.asm.wasm` 8.6 MB + `python_stdlib.zip` 2.4 MB + 胶水 1 MB），同样落在 `/assets/` 的长缓存里，第二次打开约 3 秒就绪（实测 `解释器就绪（3.1 s，Python 3.13.2 / Pyodide 0.29.5）`）。两套工具链各装各的，切来切去不用重新下载。
+
 换任何静态服务器都行，只要注意四点：`.wasm` 建议给 `application/wasm` 这个 MIME（不对的话会退化成先收完整字节再编译，能用但慢）；如果加了 CSP，必须允许 `'wasm-unsafe-eval'`（或 `'unsafe-eval'`），否则 wasm 编译本身会被拒；要用单步调试就必须带上 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`（`serve.py` 已经带上了）——没有这两个响应头就没有跨源隔离，`SharedArrayBuffer` 拿不到，调试器停不住；**而这两个头只在安全上下文里有效**：`http://公网域名` 下加满了头也不会有 `SharedArrayBuffer`，必须是 `https://`，或本机的 `http://localhost` / `http://127.0.0.1`。这条是 nginx 部署最容易踩的，见下面「部署建议」。
 
 ## 界面与操作
 
 | 控件 | 作用 |
 | --- | --- |
-| 示例 | 22 个预置用例，下拉框按课程章节分成 11 组（`optgroup`）：慢速演示 / 排序（插入-冒泡-快排对比、归并 + 逆序对）/ 线性表（顺序表插入删除 + 二分、手写单链表逆置 + 快慢指针）/ 栈与队列（括号匹配 + 逆波兰求值、循环队列 + 约瑟夫环）/ 树（先中后序 + 层序、BST 插入删除 + 高度、合并果子堆）/ 图（邻接表 DFS/BFS、Dijkstra 最短路、并查集连通块）/ 查找与字符串（KMP next 表、散列表除留余数 + 拉链法）/ 竞赛风格（万能头演示）/ STL / 基础 / 演示。选中即同时填好源码和 stdin，比较交换次数这类输出都能手算复核。「手工冒泡排序」内置 30 个数据、手写双重循环（425 次比较 / 214 次交换），行桩触发次数多、当前行在几行之间反复推进，最适配合「每行停留」看慢动作 |
-| 标准 | `-std=c++14` / `c++17`（默认）/ `c++2a`。工具链是 LLVM 8 年代，`c++2a` 只覆盖到该快照已实现的部分 |
+| 语言 | `C++` / `Python`。切换时把当前语言的源码、stdin、观察窗名单各自存一份（`localStorage` 按语言分键，C++ 沿用不带后缀的老键，别的语言加 `.py` 之类后缀），来回切不丢。配色、字号、BGM 是全站偏好，不分语言。按钮文案、工具条字段、示例集、状态栏那格的叫法（编译耗时 / 语法检查，内存峰值 / 解释器堆）跟着换，详见下面「多语言与扩展点」 |
+| 示例 | C++ 22 个预置用例，下拉框按课程章节分成 11 组（`optgroup`）：慢速演示 / 排序（插入-冒泡-快排对比、归并 + 逆序对）/ 线性表（顺序表插入删除 + 二分、手写单链表逆置 + 快慢指针）/ 栈与队列（括号匹配 + 逆波兰求值、循环队列 + 约瑟夫环）/ 树（先中后序 + 层序、BST 插入删除 + 高度、合并果子堆）/ 图（邻接表 DFS/BFS、Dijkstra 最短路、并查集连通块）/ 查找与字符串（KMP next 表、散列表除留余数 + 拉链法）/ 竞赛风格（万能头演示）/ STL / 基础 / 演示。选中即同时填好源码和 stdin，比较交换次数这类输出都能手算复核。「手工冒泡排序」内置 30 个数据、手写双重循环（425 次比较 / 214 次交换），行桩触发次数多、当前行在几行之间反复推进，最适配合「每行停留」看慢动作。Python 一套 20 个，章节分组和算法与 C++ 那套对齐（合并果子用 `heapq`、BST 用递归插入删除、万能头和 STL 那三项换成 `读入 stdin + 中文输出` / `递归 + 大栈` / 三个演示用例），同一个算法两边各写一遍，可以对着看两种写法差多少 |
+| 标准 | `-std=c++11` / `c++14` / `c++17`（默认）/ `c++2a`。`c++11` 对着 HUSTOJ 判题机那条命令行；工具链是 LLVM 8 年代，`c++2a` 只覆盖到该快照已实现的部分 |
 | 优化 | `-O0` ～ `-O3`，默认 `-O0`。教学场景里默认不优化：单步停在的行号、悬浮看到的变量值都和源码一一对应（`-O2` 下变量被合并、循环被切开，行桩会跳来跳去）。要跑大数据压时间就手动切 `-O2`；「编译并调试」不受这个下拉框影响，本来就固定 `-O0 -g` |
-| 额外 cc1 参数 | 原样拼进 `clang -cc1`，默认 `-Wall`。可加 `-Wextra`、`-DNDEBUG` 之类 |
+| 额外 cc1 参数 | 原样拼进 `clang -cc1`，默认 `-Wall -DONLINE_JUDGE`。`-DONLINE_JUDGE` 与 HUSTOJ 判题机同一条命令行，代码里 `#ifdef ONLINE_JUDGE` 的那一支（不 `freopen`、不打印多余提示）在这儿也走得到，删掉它就切回本地那一支。可加 `-Wextra`、`-DNDEBUG` 之类 |
 | 栈大小 | 链接参数 `-z stack-size`，默认 8 MB；深递归用例可调到 64 MB |
 | 字号 | 源码编辑器字号，12 / 13 / 14（默认）/ 16 / 18 / 20 / 24 px，选完立刻生效并记进 `localStorage`，刷新保留。投影演示建议 16 px 以上 |
 | BGM | 复选框，默认开。调试时把**当前执行行的个位**弹成一个音符：个位 1 = C 大调中音 do（C4），2..7 依次 re mi fa sol la si，8 / 9 / 0 接着往高八度走（C5 D5 E5）。取消勾选就静音，选择记进 `localStorage`；勾上的当下会响一声作为确认。只有「编译并调试」有声——普通「编译并运行」没有行号可跟 |
-| 运行超时(ms) | 看门狗时长，默认 5000。到点直接终止运行用的 Worker。**只作用于「编译并运行」**，「编译并调试」不设超时 |
-| 编译并运行 | `Ctrl+Enter`（macOS `Cmd+Enter`） |
-| 编译并调试 | `Ctrl+Shift+Enter`（macOS `Cmd+Shift+Enter`），见下面「单步调试」一节 |
+| 运行超时(ms) | 看门狗时长，默认 5000。到点直接终止运行用的 Worker。**只作用于「编译并运行」**，「编译并调试」不设超时。Python 那边被终止的是常驻解释器 Worker，不是单独一个运行进程，所以页面随后会立刻自动重新装入解释器（状态栏会再报一次「解释器就绪」），下一次运行照旧 |
+| 编译并运行 | `Ctrl+Enter`（macOS `Cmd+Enter`）。Python 那一侧按钮写成「运行」，但走的仍是「先 `compile()` 查语法、再把字节码交给解释器执行」两步，所以语法错误照样当场报，不会跑一半才崩 |
+| 编译并调试 | `Ctrl+Shift+Enter`（macOS `Cmd+Shift+Enter`），见下面「单步调试」一节。Python 本期禁用，按钮 `title` 里写明缺哪几块（登记表字段 `debugWhy`） |
 | 停止 | `Ctrl+.` 或 `Esc` |
 | 热力状态条 | 只在跑过一次「编译并调试」后出现，位于源码编辑器上方：色阶图例 + 「已标 N 行，最热第 X 行 × M 次」+「清除」按钮。见下面「单步调试」一节的热力背景 |
 | 观察窗 | 源码编辑器下方一行常驻的面板：输入框填**表达式**（回车或点「添加」）加入观察，`a[i]`、`a[10]`、`a[j] > a[j+1]`、`*p`、`m[1][2]`、`&x`、`(double)x/n` 都算；单个标识符有 `<datalist>` 补全（来自插桩变量表），式子过长（>80 字符）或语法不通会当场说明。右侧 × 移除、「清空」全撤，最多 24 个。名单存 `localStorage['cpp-playground.watch']`，下次开会话还在。每停一行刷一次值，数组铺开多少个**由这一列的实际宽度现量**（列宽就多铺，挤不下靠省略号收尾，一行始终只占一行高；量不出宽度时退回固定 8 个，完整的 50 个看悬停框），整段都是可显示文字的 `char[]` 直接写成 `"hello"` 一句（同样按宽度铺，量不出宽度才给 64 个字符）。见下面「单步调试」一节的观察窗与表达式求值 |
-| 重载工具链 | 清空输出并重建编译 Worker（改了工具链文件时用） |
+| 重载工具链 / 重载解释器 | 清空输出并重建当前语言的常驻 Worker（改了工具链或 Pyodide 目录里的文件时用）；按钮文案由登记表给 |
 | 清空输出 | 输出框右上角的红色小按钮，同时清掉 stdout/stderr 和字符计数 |
 
 左侧是 Ace 编辑器（主题跟着「白天 / 夜晚」复选框走：夜晚 `one_dark`、白天 `tomorrow`；C/C++ 模式、带补全弹窗），编辑器下面挂着观察窗（只在调试会话里有值，平时显示「会话未开始」），右侧从上到下是 stdin 40%、状态栏 10%、输出 50%。源码和 stdin 会存进 `localStorage`，刷新不丢。
 
-状态栏四个格子分别是**退出码**（编译失败时显示 clang/wasm-ld 的退出码，「编译并运行」超时显示 `TLE`；调试会话不设超时，不会出现 `TLE`）、**编译耗时**、**运行耗时**、**内存峰值**（用户 wasm 实例线性内存的最终大小）。编译期诊断和运行期输出走同一条字节通道，统一解码后追加到输出框。
+状态栏四个格子分别是**退出码**（编译失败时显示 clang/wasm-ld 的退出码，「编译并运行」超时显示 `TLE`；调试会话不设超时，不会出现 `TLE`）、**编译耗时**、**运行耗时**、**内存峰值**（用户 wasm 实例线性内存的最终大小）。编译期诊断和运行期输出走同一条字节通道，统一解码后追加到输出框。这四格的名字有两格随语言变（登记表的 `buildMetric` / `memLabel`）：Python 那边第二格叫**语法检查**（量的就是 `compile()` 那一步），第四格叫**解释器堆**——CPython 的内存不是"用户模块的线性内存"，报的是整个 Pyodide 堆，量的是同一块 wasm 内存但口径完全不一样，所以名字必须换，不然和 C++ 的 8 MB 栈那种数摆在一起会被误读。
 
 ## 单步调试（断点 / 调速 / 看变量）
 
@@ -90,7 +95,55 @@ python3 serve.py 8765
 
 **前提与限制**：`SharedArrayBuffer` 要求跨源隔离，而跨源隔离又要求页面先在安全上下文里——`https://` 或本机 `http://localhost` / `127.0.0.1`，`http://公网域名` 直接出局。`serve.py` 已经带 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`，用别的服务器要自己加，否则页面会直说拿不到 `SharedArrayBuffer`，并把到底缺哪一层（非安全上下文 / 缺头 / 浏览器没有这个对象）写在同一行里。行号可信的前提是 `-O0`，调试构建不接受优化档位；STL 头文件里的实现不插桩，所以单步进不了 `std::sort` 内部；这套行号来自 IR 元数据而不是 DWARF 的 `.debug_line`，够教学演示，但别按 gdb 的语义期待它。
 
+## 多语言与扩展点
+
+`js/langs.js` 是一张登记表，`main.js` 只读它的字段、不认具体语言。每项的字段：
+
+| 字段 | 管什么 |
+| --- | --- |
+| `label` / `title` / `docTitle` / `titleTip` | 下拉框里的名字、页面 `h1` 的文字、浏览器标签页标题、标题悬停说明 |
+| `aceKey` | Ace 的语法与片段模块名（`mode-<key>.js`、`snippets/<key>.js`），切换语言时 `session.setMode` 用它 |
+| `filename` / `runName` | 诊断里显示的源文件名、递给运行侧的产物名 |
+| `assets` / `initHint` / `readyLabel` | 工具链资源（相对 `assets/`，就绪提示会把它们的值列进缺件清单）、初始化那句提示、就绪那句的主语 |
+| `compileWorker` / `runWorker` / `singleWorker` | 常驻 worker、一次性运行 worker、以及两者是否合一（解释器型语言为真） |
+| `fields` | 工具条上这门语言用得着的字段 id（`std` / `opt` / `extra` / `stack`），其余连「每行停留」「BGM」「热力条」「观察窗」一起隐藏 |
+| `examples` | 示例集（纯数据，键序即下拉框顺序） |
+| `runLabel` / `debugLabel` / `reloadLabel` / `stdinHint` / `buildMetric` / `memLabel` | 三处按钮文案、stdin 小标题、状态栏两格的名字 |
+| `debug` / `debugWhy` | 能不能单步调试；不能时「编译并调试」禁用，`debugWhy` 写进它的 `title` |
+| `phaseText` / `killedText` | 构建各阶段失败时怎么说（编译 / 链接 / 插桩 / 语法检查）、超时被终止那句怎么说（C++ 杀的是运行 Worker，解释器型杀的是常驻解释器，措辞不能共用） |
+| `opts(ui, debug)` | 把工具条的值翻成这门语言 worker 认的选项 |
+
+worker 协议也和语言无关：`init` / `compile` → `progress` / `ready` / `result` / `error`，`run` → `write` / `guest` / `exit`。产物一律叫 `artifact`（一块 `ArrayBuffer`），字节数由 worker 算好放进 `size`——页面不知道也不需要知道那是 wasm 还是 marshal 过的字节码，`ready` 里那句版本 / 文件数走自由的 `detail` 字符串。
+
+**加第三门语言要做的五件事**：① `LANGS` 里加一项；② 一个常驻编译 worker（解释器型可以和运行合一，置 `singleWorker: true`）；③ 编译型语言再加一个一次性运行 worker；④ 一份 `js/examples.<id>.js`（纯数据，形如 `{ '用例名': { group, stdin, code } }`）；⑤ `index.html` 里按顺序补上 `<script>`、把 `LANG_ORDER` 加上这个 id、给页脚加一条 `<ul data-lang="<id>">` 的限制清单。`main.js` 不用改。localStorage 也自动分键：`localKey(base, lang)` 只给非 C++ 语言加 `.<id>` 后缀，C++ 沿用老键，老用户存的源码不受影响。
+
+## Python 支持做到哪一步
+
+本期完成的是「装载 + 运行 + 诊断 + stdin」，单步调试还没做，原因在下面第 5 条。
+
+**1）自托管 Pyodide 0.29.5（CPython 3.13.2）**，目录 `assets/pyodide/`，约 12 MB，全部走 `/assets/` 的长缓存。版本是钉住的：3.14 世代的构建（如 314.0.7）不再支持 classic worker，只能用 ES module worker，而本页所有 worker（包括 clang 那两个）都是 classic，换过去要把四个 worker 一起改造。0.29.5 是仍支持 classic worker 的最新一代，`js/py.worker.js` 里 `importScripts('pyodide.js')` 就能装。
+
+**2）常驻解释器，不像 clang 那样每次运行新建。** 这是成本结构反过来的结果：clang 是编译重（工具链 60 MB、一次编译几秒）、运行轻，所以编译 Worker 常驻、运行 Worker 用完即弃；Pyodide 的重资产是运行时本身（装入 3 秒），一次脚本执行只有几毫秒，所以 `singleWorker: true`——一个 worker 同时收 `compile` 和 `run`，跑完不销毁。`main.js` 侧的对应改动是 `onCompileMessage` 的 `default:` 分支把不认识的报文转给 `onRunMessage`，以及 `finishRun()` 里「什么时候该重建 worker」的判据：普通正常退出留着复用，**被超时终止 / 被停止 / 解释器自己报了内部错误**这三种才 `terminate()` 后自动重新初始化（`py.worker.js` 在 `exit` 报文里带 `note` 说明是哪种）。实测「死循环」用例走完整条链路：6 秒判 TLE → 输出 `[已终止] 运行超过 6000 ms` → 状态栏自己变回「解释器就绪（3.1 s，Python 3.13.2 / Pyodide 0.29.5）」→ 下一个用例照跑。
+
+**3）产物是 marshal 字节码，不是 wasm。** 点「运行」其实有两步：先 `compile(src, 'main.py', 'exec')` 出代码对象，这一步的 `SyntaxError` 当场报诊断；再把 `marshal.dumps(code)` 当作 `artifact` 交给运行侧，运行侧 `marshal.loads` 后在一个**全新的 dict** 里 `exec`。这么切是为了跟 C++ 那条「编译 → 产物 → 运行」的路径同构（观察窗、退出码、耗时、内存四格的语义才一致），也顺手把语法错误挡在执行之前——不会像直接 `runPython` 那样，跑到第 200 行才发现第 200 行写错了。代码对象和诊断在 JS 侧和 Python 侧之间靠 Pyodide 的内存 FS 传（`/tmp/_pg_artifact.bin`、`/tmp/_pg_diag.txt`），不靠字符串序列化，避免「这是文本还是字节」的二次猜测。
+
+**4）诊断按 clang 的口径重排。** 用户看到的不是 Python 原样的 `File "<stdin>", line 1` 那套，而是
+```
+main.py:1:16: error: expected ':'
+def greet(name)
+               ^
+```
+行列取自 `SyntaxError.lineno` / `offset`，有 `end_offset` 就画成 `^~~~` 一段范围，`IndentationError` 的 `error: [IndentationError: unindent ...]` 保持一行内可 grep。文件名用登记表的 `filename`（`main.py`），所以复制粘贴到本地 `python -m py_compile` 也能对上。运行期异常则维持 Python 原样的 traceback，只把解释器自己那几层 bootstrap 帧去掉——最后一行是 `ZeroDivisionError: division by zero`，中间只有 `File "main.py", line 8, in <module>` 这样的用户帧，退出码给 1。
+
+**5）stdio 和 stdin 的口径。** 输出用 Pyodide 的 `raw` 字节回调（不是 `batched`）：`batched` 那个 `StringWriter` 会把行尾的 `\n` 剥掉、还会丢 `NUL` 字节，中文和多字节字符要等整行齐了才给，跨 flush 边界的字符就可能断。字节直接进和 C++ 那侧共用的 `TextDecoder(stream)` 通道，换行按 `\n`、攒到 8 KB 或每次要读 stdin 之前刷一次。`print("输入：", end=" ")` 这种不带换行的提示因此看得见；`input()` 走 `setStdin`，`stdin` 框里的整段文本按行喂，读到底给 EOF（`autoEOF`）。**它是整段文本，不是 tty**：`sys.stdin.read()` 一次拿到全部、`input()` 不实时回显、终端控制序列没有意义。
+
+**6）还没做的：单步调试。** 不是"复制一份 C++ 的实现"那么省事，两处底层机制都得换：行桩要从现在的 IR 插桩换成 **AST 插桩**（`compile()` 前给每个 `ast` 语句节点包一个回调，因为 wasm 里没有 `!DILocation` 可以解析）；变量值要从「主线程按地址直接读共享内存」换成「停住时递一份 `locals()` 快照」——CPython 的对象住在解释器堆里，不是 wasm32 下一个能按 `(地址, 元素宽度, 个数)` 定位的定长字段，`arr` 那套地址通道没有对应物。控制块的 park/step 握手（`Atomics.wait` + `GO`）本身语言无关，可以照用，所以路线是：② AST 行桩接上现有调试 UI → ③ 快照值通道 + 观察窗改用 `eval()` 求表达式 → ④ 文案与示例。在那之前 `debug: false`，按钮禁用并在 `title` 里写清楚缺哪两块，避免有人以为是坏了。
+
+**7）Python 侧其余限制**：不装第三方包（`loadPyodide({packages: []})`，`pyodide-lock.json` 只是留在目录里没用到），标准库够用；`sys.path` 上没有用户文件，内存 FS 里除了那两个临时文件是空的；递归深度受 CPython 的 `sys.setrecursionlimit`（默认 1000）和 wasm 那侧栈大小双重限制，「递归 + 大栈」用例演示了把上限调到能跑深度 1500 的写法，再深会 `RecursionError` 而不是像 C++ 那样栈溢出；没有并行（`threading` 能 import 但没有真正的线程，`multiprocessing` 直接不可用），也没有 socket。
+
 ## 工作原理
+
+C++ 那条路：
 
 ```
 Ace 编辑器 ──源码字节──> compile.worker（常驻）
@@ -108,9 +161,24 @@ Ace 编辑器 ──源码字节──> compile.worker（常驻）
                           主线程 TextDecoder(stream) → 输出框
 ```
 
+Python 那条路（同一个协议，两个阶段挤进同一个常驻 worker）：
+
+```
+Ace 编辑器 ──源码文本──> py.worker（常驻，singleWorker）
+                          compile(src, 'main.py', 'exec') ── SyntaxError ──> 诊断文本
+                                │ 通过
+                          marshal.dumps(code) → artifact（字节码，不是 wasm）
+                                │ 同一 worker 内立刻执行
+                          marshal.loads → exec(code, 全新 dict)
+                                │ raw 字节回调（每个 UTF-8 字节一次）
+                       stdout/stderr 字节流 │ 退出码 / 耗时 / 解释器堆
+                                ↓
+                          主线程 TextDecoder(stream) → 输出框（和 C++ 同一个解码头）
+```
+
 几个关键设计：
 
-编译 Worker 常驻，工具链和 sysroot 只加载一次；运行 Worker 每次新建、用完即弃。这样超时只要 `terminate()` 就能硬杀死循环，且不会伤到编译器状态，代价是一次 Worker 创建（约几毫秒）。
+编译 Worker 常驻，工具链和 sysroot 只加载一次；运行 Worker 每次新建、用完即弃。这样超时只要 `terminate()` 就能硬杀死循环，且不会伤到编译器状态，代价是一次 Worker 创建（约几毫秒）。Python 把这个取舍反了过来——它的重资产是解释器本身，所以编译和运行合在同一个常驻 worker 里，见上面「Python 支持做到哪一步」第 2 条。
 
 输入输出全程按 `Uint8Array` 传字节，只在主线程用 `TextDecoder('utf-8', {stream:true})` 解码，中文和跨 flush 边界的多字节字符不会乱码。
 
@@ -128,20 +196,30 @@ cpp-wasm-playground/
 │                           （把稿子转成能直接粘进微信编辑器的 HTML，样式全走行内、
 │                            图片转 data URI，否则粘贴时图片会丢）
 ├── js/
+│   ├── langs.js            语言登记表：本页唯一的扩展点，字段含义见「多语言与扩展点」
 │   ├── wasmclang.js        工具链驱动层：Toolchain / MemFS / WasiApp / Tar / IR 行插桩与变量表
-│   ├── compile.worker.js   常驻编译 Worker
-│   ├── run.worker.js       一次性运行 Worker
+│   ├── compile.worker.js   常驻编译 Worker（C++）
+│   ├── run.worker.js       一次性运行 Worker（C++）
+│   ├── py.worker.js        常驻解释器 Worker（Python）：compile / marshal 产物 / 执行 / stdio 全在一个 worker 里
+│   ├── examples.cpp.js     C++ 示例集（22 个，纯数据）
+│   ├── examples.py.js      Python 示例集（20 个，与 C++ 那套章节对齐）
 │   ├── dbgproto.js         调试控制块（SharedArrayBuffer）布局：控制槽 / 断点表 / 变量值表 / 每行执行次数 / 数组快照，主线程与 Worker 共用一份定义
 │   └── main.js             UI 编排、Ace、指标、快捷键、localStorage
-├── assets/                 工具链（约 60 MB，见下方致谢）
+├── assets/                 工具链（C++ 约 60 MB + Python 约 12 MB，见下方致谢）
 │   ├── clang.wasm          31.2 MB
 │   ├── lld.wasm            19.5 MB
 │   ├── sysroot.tar          9.3 MB（解包后 8.95 MB / 416 个文件，运行时另补 1 个虚拟万能头）
-│   └── memfs.wasm           345 KB
+│   ├── memfs.wasm           345 KB
+│   └── pyodide/            Pyodide 0.29.5（CPython 3.13.2）：pyodide.asm.wasm 8.6 MB
+│                            + python_stdlib.zip 2.4 MB + pyodide.asm.js 1 MB + pyodide.js
+│                            + pyodide-lock.json（没装第三方包，这个清单只是随包留下没用到）
 └── vendor/ace/             ace-builds 1.45.2 的 src-min-noconflict 子集（约 552 KB，本地化以保证离线可用）
+                            c_cpp 和 python 两套 mode + snippets 都在里面
 ```
 
 ## 已知限制
+
+### C++
 
 工具链是 LLVM 8 年代的 clang + libc++，不是 GCC/libstdc++。`<bits/stdc++.h>` 是 libc++ 没有的，本页在 sysroot 之外补了一个虚拟头顶上（见上面「万能头」一节），但里面的清单只收了这份 sysroot 实测能过的头：`<csetjmp>` `<csignal>` 因为缺 `setjmp.h` / 不提供 `::signal` 被排除，`<thread>` `<mutex>` `<future>` `<condition_variable>` `<shared_mutex>` `<filesystem>` `<regex>` 这类头文件本身能编，但这份 sysroot 没链 pthread，真调用就是链接期未定义符号或运行期 trap，所以也不在万能头里——要用请显式 `#include`，并接受链接/运行可能失败。此外没有 C++20 的 `<concepts>` `<ranges>` `<format>` `<coroutine>`，也不要有"和 g++ 报错完全一致"的预期。libc++ 的 STL 本身（容器、算法、迭代器、`<string>` `<map>` `<sstream>` `<chrono>` 等）是完整可用的。
 
@@ -155,7 +233,13 @@ cpp-wasm-playground/
 
 数组展开和观察窗的覆盖面：能展开的是**定长、元素为标量或指针的本地数组**（`int a[30]`、`double m[4][4]`、`char s[64]`，多维按行优先摊成一维看），元素是结构体 / `std::string` / 容器的数组只知道名字和类型、不展开内容；`int a[]` 形参和变长数组在 `-O0` 下 DWARF 给的是指针类型，没有长度信息，悬停只能显示地址（观察窗里 `a[i]` 能算，按指针步长走）。悬停一次给前 50 个元素、观察窗一行按这一列的宽度现量给（量不出宽度才退回 8 个），都不是采样估算：悬停那个数是写死的上限，面板那个数是这一列实际有多少像素；`char s[n]` 整段都是可显示文字时不铺元素，直接写成 `"hello"` 一句（面板同样按宽度铺、量不出宽度才给 64 个字符，悬停固定 200 个，判定见上面「字符数组什么时候算字符串」），掺了控制字节或非法 UTF-8 才退回报数。观察窗收的是**表达式**，但那个求值器只读内存、不执行代码：`a[i]`、`a[10]`、`m[1][2]`、`*p`、`p[i]`、`&x`、`a+j`、四则 / 比较 / 逻辑 / 位运算、三元、类型转换都能算；**算不了**的是成员访问（`s.x`、`p->v`）、函数调用（`v.size()`）、`sizeof`、字符串字面量、`++/--`，以及**全局变量**——插桩的变量表只收 `llvm.dbg.declare` 覆盖的局部变量，`g[2]` 会直接报「本次构建的变量表里找不到它」。未定义行为不猜结果（除 0、越界移位、NaN 转整数都回一句原因），下标越界则不拦（C++ 本来也不拦，读到的是相邻内存）。栈槽地址按变量登记、不按调用帧：函数返回后同一个槽会被后面的调用复用，递归函数里同名数组只留最后一次登记的那一份。
 
-所以：**这个可以当教学、写码验证、面试手撕、离线 playground 用，不能当 OJ 判题后端**。判题要的是精确内存计量、进程级隔离、可对齐 g++ 的诊断信息，这些只有服务端真装一个 g++ 才给得了。
+### Python
+
+本版只做「运行 + 语法诊断 + 运行时异常 + stdin」，**单步调试、断点、变量悬停、观察窗、热力背景、BGM 全部没有**：「编译并调试」按钮禁用，鼠标放上去会写明缺哪两块（AST 行桩、`locals()` 快照值通道，路线见上面「Python 支持做到哪一步」第 6 条）。这几栏面板在 Python 下连显示都不显示，不是显示了点不动。
+
+不装第三方包，`import numpy` 这类会直接失败；标准库够用。stdin 是**整段文本**而不是 tty：`input()` 不实时回显、`sys.stdin.read()` 一次读到 EOF，交互式的猜数字游戏在这里没法一路问答下去。递归深度是 `sys.setrecursionlimit`（默认 1000）和 wasm 栈两重上限，超了给 `RecursionError`；内存超了是 Pyodide 堆先长到浏览器不给涨，报法跟 C++ 那边的 `memory access out of bounds` 不一样。「内存峰值」那一格在 Python 下改名「解释器堆」，量的是整个 Pyodide 的堆（起步就 20 MB 上下），不是用户程序自己吃了多少，不能拿去和 C++ 的数对比，也不能当 MLE 判据。超时终止的是常驻解释器，代价是下一次运行要先等它重新装入（约 3 秒，缓存没命中时更久）。同样**不能当判题后端**，而且比 C++ 那条路更不适合——判 Python 本来就该在服务端跑真 CPython。
+
+所以：**这个可以当教学、写码验证、面试手撕、离线 playground 用，不能当 OJ 判题后端**。判题要的是精确内存计量、进程级隔离、可对齐 g++ 的诊断信息，这些只有服务端真装一个 g++（或服务端真装一个 CPython）才给得了。
 
 ## 部署建议
 
@@ -229,6 +313,10 @@ server {
 
 nginx 开 `gzip on` 并把 `application/wasm` 加进 `gzip_types` 就能拿到上面的数字；brotli 预压缩还能再小一点。工具链是无版本的静态文件，`Cache-Control: public, max-age=31536000, immutable` 尽管打满（`serve.py` 已经这么做了）。
 
+Python 那边只有 12 MB，但同样值得压：实测 `gzip -9` 把 `pyodide.asm.wasm` 从 8.65 MB 压到 2.83 MB（`application/wasm` 已经在 `gzip_types` 里的话这条自动生效）；`python_stdlib.zip` 里面本来就是 deflate，再压只从 2.42 MB 到 2.38 MB，可以不管。`/assets/` 那条长缓存规则是按前缀匹配的，`assets/pyodide/` 已经一起罩住了。`python_stdlib.zip` 是解释器自己要读的字节（`loadPyodide({stdLibURL})` 默认指到 `indexURL + python_stdlib.zip`），走的是哪条取数路径由 Pyodide 内部决定，MIME 不参与判定，nginx 默认的 `application/zip` 就行。
+
+真正要注意的还是上面那条：**这两个头罩不住子目录就没了跨源隔离**，Pyodide 本身不吃 `SharedArrayBuffer`（普通编译运行在非隔离上下文里也能跑），但同一页面切回 C++ 就要用调试，别只给 Python 那一侧放开。
+
 ## 依赖与致谢
 
 这个项目完全站在前人的肩膀上——把 LLVM 编译进 wasm、把 WASI 宿主接口在浏览器里跑通这些最难的部分，上游都做完了；本项目做的事是把它们接成一条 textarea → textarea 的路径，并修掉这条路上几个 I/O 与健壮性问题。
@@ -240,10 +328,14 @@ nginx 开 `gzip on` 并把 `application/wasm` 加进 `gzip_types` 就能拿到�
 | [luoxuhai/clang.js](https://github.com/luoxuhai/clang.js) | 0.1.1 | Apache-2.0 | `assets/` 下的四个 wasm/tar 二进制（其 README 说明这些二进制复制自 binji 的 llvm-project fork） |
 | [LLVM Project](https://llvm.org/)（Clang、LLD、libc++、libc++abi、compiler-rt） | clang 8.0.1 世代 | Apache-2.0 WITH LLVM-exception（LLVM 9 之前的版本为 NCSA/UIUC 许可，源码树内各子项目还带各自的第三方许可） | sysroot 里的头文件、静态库，以及被编译成 `clang.wasm` / `lld.wasm` 的那份源码 |
 | [wasi-libc](https://github.com/WebAssembly/wasi-libc) | — | 多重许可：Apache-2.0 WITH LLVM-exception / Apache-2.0 / MIT | sysroot 里的 `libc.a`、`crt1.o` 与 WASI 预览版头文件 |
-| [ajaxorg/ace](https://github.com/ajaxorg/ace)（ace-builds） | 1.45.2 | BSD-3-Clause | 源码编辑器的语法高亮、行号、补全 |
+| [ajaxorg/ace](https://github.com/ajaxorg/ace)（ace-builds） | 1.45.2 | BSD-3-Clause | 源码编辑器的语法高亮、行号、补全；`c_cpp` 和 `python` 两套 mode + snippets 都取的是本地那份 |
+| [pyodide/pyodide](https://github.com/pyodide/pyodide) | 0.29.5 | Apache-2.0（`assets/pyodide/` 里另附的 `LICENSE` 为准） | Python 那一侧的整条运行时：`pyodide.asm.wasm` 是把 CPython 编成 wasm 的构建产物，`pyodide.js` / `pyodide.asm.js` 是加载器和 Emscripten 胶水，`python_stdlib.zip` 是标准库 |
+| [CPython](https://github.com/python/cpython) | 3.13.2（Pyodide 0.29.5 内嵌的版本） | PSF-2.0 | 语言本身：`compile()` / `marshal` / traceback 的语义、标准库内容，全部来自这份解释器，本项目只做外层装载和 stdio |
 
 本项目的浏览器端改动集中在 I/O 与健壮性，不是重新实现工具链：stdin/stdout 改为字节传输并流式解码（上游拼字符串，中文会乱码）；实现了 `clock_time_get`（上游直接抛 `NotImplemented`，导致 `std::chrono` 和 `time()` 不可用）；链接参数补上 `-lclang_rt.builtins-wasm32`（否则用了 128 位整型的路径会 `undefined symbol: __lttf2`）；宿主导入用 `Proxy` 兜底，未实现的 WASI 函数会在报错信息里指名而不是抛裸 `LinkError`；内存 FS 的 `FindNode` 对不存在的路径是 trap 而不是返回哨兵，因此用 try/catch 包住并二次校验退出码。
 
 ## 许可
 
 `js/wasmclang.js` 派生自 Apache-2.0 的 binji/wasm-clang，再分发时请连同它的版权声明一起保留；本项目其余自研代码同样按 Apache-2.0 提供。`assets/` 下的 LLVM 与 wasi-libc 二进制受各自上游许可约束（Apache-2.0 系为主，wasi-libc 另含 MIT 选项，LLVM 8 世代的代码还带 NCSA/UIUC 条款），`vendor/ace/` 为 BSD-3-Clause（Copyright (c) 2010, Ajax.org B.V.）。这些版权声明都别删；上游若附带 `NOTICE` 文件，按 Apache-2.0 的要求一并随分发保留。
+
+`assets/pyodide/` 这一目录要单独说一句：里面的五个文件是 Apache-2.0 的 Pyodide 发行物，而它们跑的语义来自 PSF-2.0 的 CPython。**本目录里只有二进制和加载器，没有带上游的 `LICENSE` 正文**（我们是从 CDN 直接取的文件，没解包 wheel 里的许可附件）。自己部署给人用没问题，但对外再分发这 12 MB 时，请按 Apache-2.0 和 PSF-2.0 各补一份上游 `LICENSE` 进去——从 Pyodide 仓库和 CPython 仓库各取一份就行，别到要用的时候才发现缺。

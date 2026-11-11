@@ -1,26 +1,37 @@
-/* main.js — 页面编排：常驻编译 Worker + 一次性运行 Worker */
+/* main.js — 页面编排：语言登记表（langs.js）+ 编译 Worker + 运行 Worker
+   这里不认具体语言：资源、worker、示例、按钮文案、工具条字段全从 lang 里取。
+   再加一门语言 = 往 langs.js 加一项 + 一个 worker + 一份 examples.<id>.js。 */
 'use strict';
 
 /* Worker 里 fetch 是相对 worker 脚本解析的，所以必须给绝对 URL */
 const BASE = new URL('assets/', location.href).href;
-const ASSETS = { clang: 'clang.wasm', lld: 'lld.wasm', memfs: 'memfs.wasm', sysroot: 'sysroot.tar' };
+
+function storedLang() {
+  try { return localStorage.getItem(LANG_KEY); } catch (e) { return null; }
+}
+let lang = langById(storedLang());
 
 const $ = (id) => document.getElementById(id);
 const stdinEl = $('stdin'), outEl = $('out');
 const dotEl = $('dot'), msgEl = $('msg');
 const runBtn = $('run'), stopBtn = $('stop'), clearBtn = $('clear'), reloadBtn = $('reload');
 const debugBtn = $('debug'), dbgBar = $('dbgbar'), dbgState = $('dbgstate'), dbgSpeed = $('dbspeed');
+const langSel = $('lang');
 
 /* ---------- Ace 编辑器（模块全部本地化，保持离线可用） ---------- */
 const ACE_BASE = new URL('vendor/ace/', location.href).href;
-ace.config.setModuleUrl('ace/mode/c_cpp', ACE_BASE + 'mode-c_cpp.js');
 ace.config.setModuleUrl('ace/theme/one_dark', ACE_BASE + 'theme-one_dark.js');
 ace.config.setModuleUrl('ace/theme/tomorrow', ACE_BASE + 'theme-tomorrow.js');
-ace.config.setModuleUrl('ace/snippets/c_cpp', ACE_BASE + 'snippets/c_cpp.js');
 ace.config.setModuleUrl('ace/ext/language_tools', ACE_BASE + 'ext-language_tools.js');
+/* 各语言的语法/片段模块一次性登记好，切语言时只 setMode，不用再注册 URL */
+for (const id of LANG_ORDER) {
+  const k = LANGS[id].aceKey;
+  ace.config.setModuleUrl('ace/mode/' + k, ACE_BASE + 'mode-' + k + '.js');
+  ace.config.setModuleUrl('ace/snippets/' + k, ACE_BASE + 'snippets/' + k + '.js');
+}
 
 const srcEditor = ace.edit('editor', {
-  mode: 'ace/mode/c_cpp',
+  mode: 'ace/mode/' + lang.aceKey,
   theme: 'ace/theme/one_dark',
   fontSize: '14px',          /* 真正的值由下面 initFontSize 按 localStorage 覆盖 */
   showPrintMargin: false,
@@ -167,892 +178,6 @@ function updateSrcLen() {
   $('srclen').textContent = `${v.length} 字符 / ${v.split('\n').length} 行`;
 }
 
-const EXAMPLES = {
-  '手工冒泡排序（慢速演示）': {
-    group: '慢速演示',
-    stdin: '',
-    code: `#include <iostream>
-#include <iomanip>
-
-// 30 个数据，手工冒泡。比较 + 交换约 425 / 214 次，
-// 双重循环会把当前行高亮一格一格往前推，适合配合「每行停留」看慢动作。
-int main() {
-    int a[30] = {42, 17, 88, 3, 65, 29, 51, 74, 8, 93,
-                 36, 12, 60, 47, 21, 79, 5, 68, 34, 56,
-                 90, 15, 63, 40, 72, 26, 85, 11, 49, 23};
-    int n = 30;
-
-    std::cout << "排序前：\\n";
-    for (int i = 0; i < n; ++i) {
-        std::cout << std::setw(4) << a[i];
-        if (i % 10 == 9) std::cout << "\\n";
-    }
-    std::cout << "\\n";
-
-    int cmp = 0, swp = 0;
-    for (int i = 0; i < n - 1; ++i) {
-        bool swapped = false;
-        for (int j = 0; j < n - 1 - i; ++j) {
-            ++cmp;
-            if (a[j] > a[j + 1]) {
-                int t = a[j]; a[j] = a[j + 1]; a[j + 1] = t;
-                ++swp; swapped = true;
-            }
-        }
-        std::cout << "第 " << i + 1 << " 趟后：";
-        for (int k = 0; k < n; ++k) std::cout << std::setw(4) << a[k];
-        std::cout << "\\n";
-        if (!swapped) break;
-    }
-
-    std::cout << "排序完成：比较 " << cmp << " 次，交换 " << swp << " 次。\\n";
-    return 0;
-}
-`,
-  },
-  '三种排序对比（插入/冒泡/快排）': {
-    group: '排序',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <algorithm>
-#include <string>
-using namespace std;
-
-/* 三种排序统计的基本操作不一样，单位也得跟着变：插入是「移动」（后移 + 落位各算一次），
-   冒泡和快排是「交换」。传字符串进去，输出就不至于把交换说成移动。 */
-void show(const string& tag, const vector<int>& a, long long cmp, long long mv,
-          const string& unit) {
-    cout << tag << "：比较 " << cmp << " 次，" << unit << " " << mv << " 次  ";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-}
-
-void insertionSort(vector<int> a) {
-    long long cmp = 0, mv = 0;
-    for (int i = 1; i < (int)a.size(); ++i) {
-        int x = a[i], j = i - 1;
-        while (j >= 0) {
-            ++cmp;
-            if (a[j] <= x) break;
-            a[j + 1] = a[j]; ++mv; --j;      // 后移一位
-        }
-        a[j + 1] = x; ++mv;
-    }
-    show("插入排序", a, cmp, mv, "移动");
-}
-
-void bubbleSort(vector<int> a) {
-    long long cmp = 0, swp = 0;
-    int n = (int)a.size();
-    for (int i = 0; i < n - 1; ++i) {
-        bool swapped = false;
-        for (int j = 0; j < n - 1 - i; ++j) {
-            ++cmp;
-            if (a[j] > a[j + 1]) { swap(a[j], a[j + 1]); ++swp; swapped = true; }
-        }
-        if (!swapped) break;                  // 一整趟没交换就已经有序
-    }
-    show("冒泡排序", a, cmp, swp, "交换");
-}
-
-long long qcmp = 0, qswp = 0;                  // 快排的比较/交换次数（递归里累加，图省事放全局）
-int partition(vector<int>& a, int l, int r) { // Lomuto：拿最右边当基准
-    int x = a[r], i = l;
-    for (int j = l; j < r; ++j) {
-        ++qcmp;
-        if (a[j] <= x) { swap(a[i], a[j]); ++i; ++qswp; }
-    }
-    swap(a[i], a[r]); ++qswp;                  // 基准落位也算一次交换
-    return i;
-}
-void quickSort(vector<int>& a, int l, int r) {
-    if (l >= r) return;
-    int p = partition(a, l, r);
-    quickSort(a, l, p - 1);
-    quickSort(a, p + 1, r);
-}
-
-int main() {
-    vector<int> a = {9, 7, 5, 3, 1, 8, 6, 4, 2, 0};
-    cout << "原始数据：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n\\n";
-    insertionSort(a);
-    bubbleSort(a);
-    vector<int> b = a;
-    quickSort(b, 0, (int)b.size() - 1);
-    show("快速排序", b, qcmp, qswp, "交换");
-    cout << "\\n同一组数据，插入和冒泡都是 O(n^2)，快排这里比较次数明显更少。\\n";
-    return 0;
-}
-`,
-  },
-  '归并排序 + 逆序对计数': {
-    group: '排序',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-using namespace std;
-
-// 归并的同时数逆序对：右半的元素要先出来时，左半剩下的 m-i 个都比它大
-long long mergeSort(vector<int>& a, vector<int>& tmp, int l, int r) {
-    if (r - l <= 1) return 0;
-    int m = (l + r) / 2;
-    long long cnt = mergeSort(a, tmp, l, m) + mergeSort(a, tmp, m, r);
-    int i = l, j = m, k = l;
-    while (i < m && j < r) {
-        if (a[i] <= a[j]) tmp[k++] = a[i++];
-        else { tmp[k++] = a[j++]; cnt += m - i; }
-    }
-    while (i < m) tmp[k++] = a[i++];
-    while (j < r) tmp[k++] = a[j++];
-    for (int t = l; t < r; ++t) a[t] = tmp[t];
-    return cnt;
-}
-
-int main() {
-    vector<int> a = {5, 3, 8, 1, 9, 2, 7, 4, 6, 0};
-    vector<int> tmp(a.size());
-    cout << "排序前：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-    long long cnt = mergeSort(a, tmp, 0, (int)a.size());
-    cout << "排序后：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-    cout << "逆序对总数 = " << cnt << "\\n";
-    return 0;
-}
-`,
-  },
-  '顺序表：插入删除 + 二分查找': {
-    group: '线性表',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <algorithm>
-using namespace std;
-
-int binSearch(const vector<int>& a, int key) {
-    int lo = 0, hi = (int)a.size() - 1;
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;          // 写 (lo + hi) / 2 会溢出
-        if (a[mid] == key) return mid;
-        if (a[mid] < key) lo = mid + 1; else hi = mid - 1;
-    }
-    return -1;
-}
-
-int main() {
-    vector<int> a = {1, 3, 5, 7, 9, 11, 13, 15};
-    a.insert(a.begin() + 3, 6);                // 中间插入：后面整体后移，O(n)
-    cout << "下标 3 插入 6：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-    a.erase(a.begin());                        // 删头：整体前移，O(n)
-    cout << "删掉首元素：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n\\n";
-
-    for (int key : {7, 10, 15, 1}) {
-        int p = binSearch(a, key);
-        cout << "二分查 " << key << " -> ";
-        if (p < 0) cout << "不存在\\n"; else cout << "下标 " << p << "\\n";
-    }
-    cout << "lower_bound(8) 的下标 = "
-         << lower_bound(a.begin(), a.end(), 8) - a.begin() << "\\n";
-    return 0;
-}
-`,
-  },
-  '手写单链表：逆置 + 快慢指针': {
-    group: '线性表',
-    stdin: '',
-    code: `#include <iostream>
-using namespace std;
-
-struct Node {
-    int val;
-    Node* next;
-    Node(int v) : val(v), next(nullptr) {}
-};
-
-void pushFront(Node*& head, int v) {          // 头插：传引用改头指针
-    Node* n = new Node(v);
-    n->next = head;
-    head = n;
-}
-
-Node* reverse(Node* head) {                   // 三指针原地逆置
-    Node* prev = nullptr;
-    while (head) {
-        Node* nxt = head->next;
-        head->next = prev;
-        prev = head;
-        head = nxt;
-    }
-    return prev;
-}
-
-Node* middle(Node* head) {                    // 快慢指针：fast 到头时 slow 在中点
-    Node *slow = head, *fast = head;
-    while (fast && fast->next) { slow = slow->next; fast = fast->next->next; }
-    return slow;
-}
-
-bool hasCycle(Node* head) {                   // 快慢指针相遇即有环
-    Node *slow = head, *fast = head;
-    while (fast && fast->next) {
-        slow = slow->next; fast = fast->next->next;
-        if (slow == fast) return true;
-    }
-    return false;
-}
-
-void print(Node* h) {
-    for (; h; h = h->next) cout << h->val << (h->next ? " -> " : "\\n");
-}
-
-int main() {
-    Node* head = nullptr;
-    for (int v : {5, 4, 3, 2, 1}) pushFront(head, v);
-    cout << "原链表："; print(head);
-    cout << "中点值：" << middle(head)->val << "\\n";
-    cout << "有环吗：" << (hasCycle(head) ? "有" : "没有") << "\\n";
-    head = reverse(head);
-    cout << "逆置后："; print(head);
-    while (head) { Node* d = head; head = head->next; delete d; }
-    return 0;
-}
-`,
-  },
-  '栈：括号匹配 + 逆波兰求值': {
-    group: '栈与队列',
-    stdin: '',
-    code: `#include <iostream>
-#include <stack>
-#include <string>
-#include <sstream>
-using namespace std;
-
-bool bracketOK(const string& s) {
-    stack<char> st;
-    for (char c : s) {
-        if (c == '(' || c == '[' || c == '{') st.push(c);
-        else if (c == ')' || c == ']' || c == '}') {
-            if (st.empty()) return false;
-            char o = st.top(); st.pop();
-            if ((c == ')' && o != '(') || (c == ']' && o != '[') || (c == '}' && o != '{'))
-                return false;
-        }
-    }
-    return st.empty();                        // 剩括号说明没配完
-}
-
-int evalRPN(const string& expr) {             // 逆波兰：操作数压栈，运算符弹两个
-    stack<int> st;
-    istringstream in(expr);
-    string tok;
-    while (in >> tok) {
-        if (tok == "+" || tok == "-" || tok == "*" || tok == "/") {
-            int b = st.top(); st.pop();
-            int a = st.top(); st.pop();
-            int v = tok == "+" ? a + b : tok == "-" ? a - b : tok == "*" ? a * b : a / b;
-            st.push(v);
-        } else {
-            st.push(stoi(tok));
-        }
-    }
-    return st.top();
-}
-
-int main() {
-    for (string s : {"({[]})", "([)]", "((()", "{[()]}"})
-        cout << s << " : " << (bracketOK(s) ? "匹配" : "不匹配") << "\\n";
-    cout << "\\n";
-    cout << "3 + (4 - 2) * 5 = " << evalRPN("3 4 2 - 5 * +") << "\\n";
-    cout << "10 / (9 - 7) + 1 = " << evalRPN("10 9 7 - / 1 +") << "\\n";
-    return 0;
-}
-`,
-  },
-  '队列：循环队列 + 约瑟夫环': {
-    group: '栈与队列',
-    stdin: '',
-    code: `#include <iostream>
-#include <queue>
-using namespace std;
-
-struct CircQueue {                            // 定长数组 + 头尾下标取模，避免「假满」
-    static const int CAP = 8;
-    int data[CAP];
-    int head = 0, tail = 0, cnt = 0;
-    bool push(int v) {
-        if (cnt == CAP) return false;
-        data[tail] = v;
-        tail = (tail + 1) % CAP;
-        ++cnt;
-        return true;
-    }
-    int pop() {
-        int v = data[head];
-        head = (head + 1) % CAP;
-        --cnt;
-        return v;
-    }
-    bool empty() const { return cnt == 0; }
-};
-
-int main() {
-    CircQueue q;
-    for (int i = 1; i <= 10; ++i)
-        if (!q.push(i)) cout << i << " 入队失败：队列已满\\n";
-    cout << "依次出队：";
-    while (!q.empty()) cout << q.pop() << ' ';
-    cout << "\\n\\n";
-
-    const int n = 10, m = 3;                  // 约瑟夫环：数到 m 的出列
-    queue<int> circle;
-    for (int i = 1; i <= n; ++i) circle.push(i);
-    cout << "出列顺序（n=10, m=3）：";
-    while (circle.size() > 1) {
-        for (int i = 1; i < m; ++i) { circle.push(circle.front()); circle.pop(); }
-        cout << circle.front() << ' ';
-        circle.pop();
-    }
-    cout << "\\n幸存者：" << circle.front() << "\\n";
-    return 0;
-}
-`,
-  },
-  '二叉树：先中后序 + 层序遍历': {
-    group: '树',
-    stdin: '',
-    code: `#include <iostream>
-#include <queue>
-#include <string>
-using namespace std;
-
-struct TNode {
-    int val;
-    TNode *l, *r;
-    TNode(int v) : val(v), l(nullptr), r(nullptr) {}
-};
-
-TNode* insert(TNode* root, int v) {           // 按 BST 规则建树，左小右大
-    if (!root) return new TNode(v);
-    if (v < root->val) root->l = insert(root->l, v);
-    else root->r = insert(root->r, v);
-    return root;
-}
-
-void pre(TNode* r, string& s) { if (!r) return; s += to_string(r->val) + ' '; pre(r->l, s); pre(r->r, s); }
-void ino(TNode* r, string& s) { if (!r) return; ino(r->l, s); s += to_string(r->val) + ' '; ino(r->r, s); }
-void post(TNode* r, string& s){ if (!r) return; post(r->l, s); post(r->r, s); s += to_string(r->val) + ' '; }
-
-void level(TNode* root, string& s) {          // 层序靠队列，不是递归
-    if (!root) return;
-    queue<TNode*> q;
-    q.push(root);
-    while (!q.empty()) {
-        TNode* u = q.front(); q.pop();
-        s += to_string(u->val) + ' ';
-        if (u->l) q.push(u->l);
-        if (u->r) q.push(u->r);
-    }
-}
-
-void freeAll(TNode* r) { if (!r) return; freeAll(r->l); freeAll(r->r); delete r; }
-
-int main() {
-    TNode* root = nullptr;
-    for (int v : {8, 3, 10, 1, 6, 14, 4, 7, 13}) root = insert(root, v);
-    string s;
-    s.clear(); pre(root, s);   cout << "先序：" << s << "\\n";
-    s.clear(); ino(root, s);   cout << "中序：" << s << "  （BST 的中序就是有序表）\\n";
-    s.clear(); post(root, s);  cout << "后序：" << s << "\\n";
-    s.clear(); level(root, s); cout << "层序：" << s << "\\n";
-    freeAll(root);
-    return 0;
-}
-`,
-  },
-  '二叉搜索树：插入删除 + 高度': {
-    group: '树',
-    stdin: '',
-    code: `#include <iostream>
-#include <algorithm>
-using namespace std;
-
-struct BST {
-    int v;
-    BST *l, *r;
-    BST(int x) : v(x), l(nullptr), r(nullptr) {}
-};
-
-BST* insert(BST* p, int x) {
-    if (!p) return new BST(x);
-    if (x < p->v) p->l = insert(p->l, x);
-    else if (x > p->v) p->r = insert(p->r, x);
-    return p;
-}
-
-BST* findMin(BST* p) { while (p->l) p = p->l; return p; }
-
-BST* erase(BST* p, int x) {
-    if (!p) return nullptr;
-    if (x < p->v) p->l = erase(p->l, x);
-    else if (x > p->v) p->r = erase(p->r, x);
-    else if (p->l && p->r) {                  // 情况三：两个孩子，用右子树最小值顶替
-        BST* t = findMin(p->r);
-        p->v = t->v;
-        p->r = erase(p->r, t->v);
-    } else {                                  // 情况一/二：叶子或独子，直接摘掉
-        BST* t = p;
-        p = p->l ? p->l : p->r;
-        delete t;
-    }
-    return p;
-}
-
-int height(BST* p) { return p ? 1 + max(height(p->l), height(p->r)) : 0; }
-void ino(BST* p) { if (!p) return; ino(p->l); cout << p->v << ' '; ino(p->r); }
-
-int main() {
-    BST* t = nullptr;
-    for (int x : {50, 30, 70, 20, 40, 60, 80, 35, 45}) t = insert(t, x);
-    cout << "中序："; ino(t); cout << "\\n高度：" << height(t) << "\\n\\n";
-    t = erase(t, 30);                         // 30 有两个孩子
-    cout << "删 30 后："; ino(t); cout << "\\n";
-    t = erase(t, 20); t = erase(t, 80);       // 叶子
-    cout << "删 20、80 后："; ino(t); cout << "\\n高度：" << height(t) << "\\n";
-    return 0;
-}
-`,
-  },
-  '堆：合并果子（优先队列）': {
-    group: '树',
-    stdin: '',
-    code: `#include <iostream>
-#include <queue>
-#include <vector>
-#include <functional>
-using namespace std;
-
-int main() {
-    vector<int> w = {1, 3, 5, 2, 8, 4, 7, 6};
-    // 小顶堆：每次拿最小的两堆合并，就是哈夫曼贪心
-    priority_queue<int, vector<int>, greater<int> > pq(w.begin(), w.end());
-
-    long long cost = 0;
-    cout << "初始重量：";
-    for (int x : w) cout << x << ' ';
-    cout << "\\n合并过程：";
-    while (pq.size() > 1) {
-        int a = pq.top(); pq.pop();
-        int b = pq.top(); pq.pop();
-        cost += a + b;
-        cout << a << "+" << b << "=" << a + b << "  ";
-        pq.push(a + b);
-    }
-    cout << "\\n最小总代价 = " << cost << "\\n";
-    return 0;
-}
-`,
-  },
-  '图：邻接表 + DFS/BFS': {
-    group: '图',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <queue>
-#include <functional>
-#include <algorithm>
-using namespace std;
-
-int main() {
-    const int n = 6;
-    vector<vector<int> > adj(n);
-    int edges[][2] = {{0,1}, {0,2}, {1,3}, {2,3}, {3,4}, {4,5}, {2,5}};
-    for (int i = 0; i < 7; ++i) {             // 无向图：两条边都存
-        adj[edges[i][0]].push_back(edges[i][1]);
-        adj[edges[i][1]].push_back(edges[i][0]);
-    }
-    cout << "邻接表：\\n";
-    for (int i = 0; i < n; ++i) {
-        cout << "  " << i << ": ";
-        for (size_t k = 0; k < adj[i].size(); ++k) cout << adj[i][k] << ' ';
-        cout << "\\n";
-    }
-
-    vector<bool> vis(n, false);
-    cout << "\\nDFS（递归）：";
-    function<void(int)> dfs = [&](int u) {
-        vis[u] = true;
-        cout << u << ' ';
-        for (size_t k = 0; k < adj[u].size(); ++k) if (!vis[adj[u][k]]) dfs(adj[u][k]);
-    };
-    dfs(0);
-
-    fill(vis.begin(), vis.end(), false);
-    cout << "\\nBFS（队列）：";
-    queue<int> q;
-    q.push(0); vis[0] = true;
-    while (!q.empty()) {
-        int u = q.front(); q.pop();
-        cout << u << ' ';
-        for (size_t k = 0; k < adj[u].size(); ++k) {
-            int v = adj[u][k];
-            if (!vis[v]) { vis[v] = true; q.push(v); }
-        }
-    }
-    cout << "\\n";
-    return 0;
-}
-`,
-  },
-  '图：Dijkstra 最短路': {
-    group: '图',
-    stdin: '',
-    code: `#include <bits/stdc++.h>
-using namespace std;
-
-int main() {
-    const int n = 5, INF = 1e9;
-    vector<vector<pair<int, int> > > g(n);    // g[u] = {v, w}
-    int e[][3] = {{0,1,4}, {0,2,1}, {2,1,2}, {1,3,1}, {2,3,5}, {3,4,3}, {0,3,100}};
-    for (int i = 0; i < 7; ++i) g[e[i][0]].push_back(make_pair(e[i][1], e[i][2]));
-
-    vector<int> d(n, INF);
-    vector<int> pre(n, -1);                   // 记录前驱，最后能还原路径
-    d[0] = 0;
-    priority_queue<pair<int, int>, vector<pair<int, int> >, greater<pair<int, int> > > pq;
-    pq.push(make_pair(0, 0));
-    while (!pq.empty()) {
-        int du = pq.top().first, u = pq.top().second; pq.pop();
-        if (du > d[u]) continue;              // 旧记录，跳过
-        for (size_t k = 0; k < g[u].size(); ++k) {
-            int v = g[u][k].first, w = g[u][k].second;
-            if (d[v] > du + w) {
-                d[v] = du + w;
-                pre[v] = u;
-                pq.push(make_pair(d[v], v));
-            }
-        }
-    }
-
-    for (int i = 0; i < n; ++i) {
-        cout << "0 -> " << i << " = " << (d[i] >= INF ? -1 : d[i]) << "  路径 ";
-        vector<int> path;
-        for (int x = i; x != -1; x = pre[x]) path.push_back(x);
-        for (int k = (int)path.size() - 1; k >= 0; --k) cout << path[k] << (k ? " -> " : "");
-        cout << "\\n";
-    }
-    cout << "\\n注意 0->3 直接那条 100 的边不会用，走 0->2->1->3 只要 4。\\n";
-    return 0;
-}
-`,
-  },
-  '并查集：连通块个数': {
-    group: '图',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <algorithm>
-using namespace std;
-
-struct DSU {
-    vector<int> fa, sz;
-    DSU(int n) : fa(n), sz(n, 1) { for (int i = 0; i < n; ++i) fa[i] = i; }
-
-    int find(int x) {                         // 路径减半：边找边把父亲跳一级
-        while (fa[x] != x) { fa[x] = fa[fa[x]]; x = fa[x]; }
-        return x;
-    }
-    bool unite(int a, int b) {
-        a = find(a); b = find(b);
-        if (a == b) return false;
-        if (sz[a] < sz[b]) swap(a, b);        // 按大小合并，树不会退化成链
-        fa[b] = a;
-        sz[a] += sz[b];
-        return true;
-    }
-};
-
-int main() {
-    DSU d(8);
-    int pairs[][2] = {{0,1}, {1,2}, {3,4}, {5,6}, {6,7}, {2,3}, {0,4}};
-    for (int i = 0; i < 7; ++i)
-        cout << pairs[i][0] << "、" << pairs[i][1] << " 合并"
-             << (d.unite(pairs[i][0], pairs[i][1]) ? "成功" : "（本来就连通）") << "\\n";
-
-    int blocks = 0;
-    for (int i = 0; i < 8; ++i) if (d.find(i) == i) ++blocks;
-    cout << "\\n连通块个数 = " << blocks << "\\n";
-    cout << "0 和 4 连通吗：" << (d.find(0) == d.find(4) ? "是" : "否") << "\\n";
-    cout << "0 和 5 连通吗：" << (d.find(0) == d.find(5) ? "是" : "否") << "\\n";
-    return 0;
-}
-`,
-  },
-  'KMP：next 表与所有匹配位置': {
-    group: '查找与字符串',
-    stdin: '',
-    code: `#include <iostream>
-#include <string>
-#include <vector>
-using namespace std;
-
-// pi[i] = p[0..i] 里「最长的相等公共前后缀」长度，失配时靠它回退，不回读文本
-vector<int> prefixFunction(const string& p) {
-    int n = (int)p.size();
-    vector<int> pi(n, 0);
-    for (int i = 1, j = 0; i < n; ++i) {
-        while (j > 0 && p[i] != p[j]) j = pi[j - 1];
-        if (p[i] == p[j]) ++j;
-        pi[i] = j;
-    }
-    return pi;
-}
-
-int main() {
-    string s = "abababcaabababcab", p = "ababc";
-    vector<int> pi = prefixFunction(p);
-    cout << "模式串 p = " << p << "\\nnext 表：";
-    for (size_t i = 0; i < pi.size(); ++i) cout << pi[i] << ' ';
-    cout << "\\n\\n";
-
-    cout << "KMP 命中位置：";
-    for (int i = 0, j = 0; i < (int)s.size(); ++i) {
-        while (j > 0 && s[i] != p[j]) j = pi[j - 1];
-        if (s[i] == p[j]) ++j;
-        if (j == (int)p.size()) { cout << i - j + 1 << ' '; j = pi[j - 1]; }
-    }
-    cout << "\\n朴素对照：";
-    for (int i = 0; i + (int)p.size() <= (int)s.size(); ++i)
-        if (s.compare(i, p.size(), p) == 0) cout << i << ' ';
-    cout << "\\n两种结果应当完全一致。\\n";
-    return 0;
-}
-`,
-  },
-  '散列表：除留余数 + 拉链法': {
-    group: '查找与字符串',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <list>
-#include <string>
-#include <utility>
-using namespace std;
-
-const int B = 7;                              // 桶数
-
-struct HashTable {
-    vector<list<pair<string, int> > > bucket;
-    HashTable() : bucket(B) {}
-
-    int idx(const string& k) const {          // 多项式滚动哈希，再除留余数
-        unsigned h = 0;
-        for (size_t i = 0; i < k.size(); ++i) h = h * 131u + (unsigned)k[i];
-        return (int)(h % (unsigned)B);
-    }
-    void put(const string& k, int v) {
-        for (list<pair<string, int> >::iterator it = bucket[idx(k)].begin();
-             it != bucket[idx(k)].end(); ++it)
-            if (it->first == k) { it->second = v; return; }
-        bucket[idx(k)].push_back(make_pair(k, v));
-    }
-    int* get(const string& k) {
-        for (list<pair<string, int> >::iterator it = bucket[idx(k)].begin();
-             it != bucket[idx(k)].end(); ++it)
-            if (it->first == k) return &it->second;
-        return nullptr;
-    }
-};
-
-int main() {
-    HashTable t;
-    t.put("apple", 3);  t.put("banana", 7); t.put("cherry", 1);
-    t.put("durian", 9); t.put("egg", 2);    t.put("fig", 5);
-    t.put("apple", 4);                      // 同键覆盖
-
-    cout << "桶分布（mod " << B << "，冲突挂在同一条链上）：\\n";
-    for (int i = 0; i < B; ++i) {
-        cout << "  " << i << ":";
-        for (list<pair<string, int> >::iterator it = t.bucket[i].begin();
-             it != t.bucket[i].end(); ++it)
-            cout << " " << it->first << "(" << it->second << ")";
-        cout << "\\n";
-    }
-    const char* keys[] = {"apple", "fig", "grape"};
-    cout << "\\n";
-    for (int i = 0; i < 3; ++i) {
-        int* v = t.get(keys[i]);
-        cout << keys[i] << " -> ";
-        if (v) cout << *v << "\\n"; else cout << "查无此词\\n";
-    }
-    return 0;
-}
-`,
-  },
-  '万能头 bits/stdc++.h 演示': {
-    group: '竞赛风格',
-    stdin: '',
-    code: `// libc++ 本身没有 bits/stdc++.h，这个环境在 sysroot 解包后往虚拟文件系统里
-// 补了一个，内容是一串实测能编过的标准库头。线程/文件系统类不在里面：
-// wasi 侧没有 pthread，收了反而会让链接期出未定义符号。
-#include <bits/stdc++.h>
-using namespace std;
-
-int main() {
-    vector<int> a(10);
-    iota(a.begin(), a.end(), 1);            // <numeric>
-    mt19937 g(20261105);                    // <random>，固定种子所以结果可复现
-    shuffle(a.begin(), a.end(), g);         // <algorithm>
-    cout << "打乱后：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-
-    sort(a.begin(), a.end());
-    cout << "排序后：";
-    for (int x : a) cout << x << ' ';
-    cout << "\\n";
-
-    set<int> s(a.begin(), a.end());         // <set>
-    unordered_map<int, int> cnt;            // <unordered_map>
-    for (int x : a) ++cnt[x];
-    cout << "不同元素 " << s.size() << " 个，累加和 "
-         << accumulate(a.begin(), a.end(), 0) << "，最大 " << *a.rbegin() << "\\n";
-    cout << fixed << setprecision(3) << "sqrt(2) = " << sqrt(2.0) << "\\n";
-    return 0;
-}
-`,
-  },
-  'STL 容器与算法': {
-    group: 'STL',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-#include <algorithm>
-#include <numeric>
-#include <iomanip>
-
-int main() {
-    std::vector<int> v{5, 3, 9, 1, 7, 2, 8};
-
-    std::sort(v.begin(), v.end());
-    long long sum = std::accumulate(v.begin(), v.end(), 0LL);
-    auto [lo, hi] = std::minmax_element(v.begin(), v.end());
-
-    std::cout << "sorted : ";
-    for (int x : v) std::cout << std::setw(3) << x;
-    std::cout << "\\nsum    : " << sum
-              << "\\nmin,max: " << *lo << ", " << *hi
-              << "\\nsize   : " << v.size() << std::endl;
-    return 0;
-}
-`,
-  },
-  '读入 stdin + 中文输出': {
-    group: '基础',
-    stdin: `3
-Alice 92
-Bob 78
-Carol 88
-`,
-    code: `#include <iostream>
-#include <string>
-#include <vector>
-#include <algorithm>
-
-struct Student { std::string name; int score; };
-
-int main() {
-    int n;
-    if (!(std::cin >> n)) { std::cerr << "没有读到人数\\n"; return 1; }
-
-    std::vector<Student> a(n);
-    for (auto& s : a) std::cin >> s.name >> s.score;
-
-    std::sort(a.begin(), a.end(),
-              [](const Student& x, const Student& y) { return x.score > y.score; });
-
-    std::cout << "成绩排名（降序）:\\n";
-    for (size_t i = 0; i < a.size(); ++i)
-        std::cout << i + 1 << ". " << a[i].name << "  " << a[i].score << "\\n";
-
-    double avg = 0;
-    for (const auto& s : a) avg += s.score;
-    std::cout << "平均分: " << avg / a.size() << "\\n";
-}
-`,
-  },
-  'string / map / sstream': {
-    group: 'STL',
-    stdin: 'hello world hello wasm world\n',
-    code: `#include <iostream>
-#include <sstream>
-#include <string>
-#include <map>
-
-int main() {
-    std::map<std::string, int> freq;
-    std::string line, word;
-    while (std::getline(std::cin, line)) {
-        std::istringstream iss(line);
-        while (iss >> word) ++freq[word];
-    }
-    std::cout << "词频统计:\\n";
-    for (const auto& [w, c] : freq) std::cout << w << " -> " << c << "\\n";
-}
-`,
-  },
-  '递归 + 大栈': {
-    group: '基础',
-    stdin: '30\n',
-    code: `#include <iostream>
-#include <vector>
-
-unsigned long long fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
-
-int main() {
-    int n; std::cin >> n;
-    std::cout << "fib(" << n << ") = " << fib(n) << std::endl;
-    std::vector<double> buf(1 << 20, 0.5);
-    double s = 0; for (double d : buf) s += d;
-    std::cout << "1M 个 double 的和 = " << s << std::endl;
-}
-`,
-  },
-  '死循环（演示超时被终止）': {
-    group: '演示',
-    stdin: '',
-    code: `#include <iostream>
-int main() {
-    std::cout << "开始跑，不会停" << std::endl;
-    long long i = 0;
-    while (true) { ++i; }
-    std::cout << i << std::endl;
-}
-`,
-  },
-  '编译错误（演示诊断输出）': {
-    group: '演示',
-    stdin: '',
-    code: `#include <iostream>
-#include <vector>
-int main() {
-    std::vector<int> v;
-    v.adn(1);            // 拼错了
-    int n = "abc";       // 类型不对
-    std::cout << v[0] << n;
-}
-`,
-  },
-};
-
 /* ------------------------------------------------------------------ */
 /* 状态与输出                                                          */
 /* ------------------------------------------------------------------ */
@@ -1114,43 +239,42 @@ let runWorker = null;
 let watchdog = null;
 let currentRun = null;
 
-function startCompileWorker() {
+function startCompileWorker(quiet) {
   workerReady = false;
   readyPromise = new Promise((res, rej) => { readyResolve = res; readyReject = rej; });
+  /* 装失败时未必有人在 await（刚进页面就 404），先挂个空的 catch，
+     免得控制台多一条 unhandled rejection 把真正的原因挤下去 */
+  readyPromise.catch(() => {});
   if (compileWorker) compileWorker.terminate();
-  compileWorker = new Worker('js/compile.worker.js');
+  compileWorker = new Worker(lang.compileWorker);
   compileWorker.onmessage = onCompileMessage;
   compileWorker.onerror = (e) => {
     setDot('bad');
     say('Worker 出错：' + e.message, 'err');
   };
   setDot('busy');
-  say('正在初始化工具链（首次需下载约 58 MB）…');
-  compileWorker.postMessage({ type: 'init', base: BASE, assets: ASSETS });
+  /* quiet：超时/停止把常驻解释器杀掉之后自动重装，这时状态栏留着「已终止」
+     那句话更有用，别用「正在初始化」把它盖掉。 */
+  if (!quiet) say(lang.initHint);
+  compileWorker.postMessage({ type: 'init', base: BASE, assets: lang.assets });
 }
 
 function onCompileMessage(ev) {
   const m = ev.data;
   switch (m.type) {
     case 'progress': say(m.text + '…'); break;
-    case 'write': pushBytes(new Uint8Array(m.bytes)); break;
     case 'ready':
       workerReady = true;
       setDot('ready');
-      say(`工具链就绪（${(m.initMs / 1000).toFixed(1)} s，sysroot 装入 ${m.sysrootFiles} 个文件）`, 'ok');
+      say(`${lang.readyLabel}（${(m.initMs / 1000).toFixed(1)} s，${m.detail}）`, 'ok');
       readyResolve();
-      break;
-    case 'stage':
-      if (m.stage === 'compile') say('编译中（clang -cc1）…');
-      else if (m.stage === 'compile-debug') say('调试构建中（出 IR → 插桩 → 目标文件 → 链接）…');
       break;
     case 'result':
       if (m.ok) {
-        lastCompileMs = m.ms;
         /* 观察窗的补全名单跟着每次插桩构建刷新（普通运行没有变量表，跳过） */
         if (m.vars) fillWatchNames(m.vars);
         compileResolve && compileResolve({
-          wasm: m.wasm, lines: m.lines || null,
+          artifact: m.artifact, size: m.size, lines: m.lines || null,
           vars: m.vars || null, lineVars: m.lineVars || null,
         });
       }
@@ -1158,74 +282,94 @@ function onCompileMessage(ev) {
       break;
     case 'error':
       setDot('bad');
-      say('工具链没能装入，原因见输出框', 'err');
+      say('初始化失败，原因见输出框', 'err');
       /* 把页面实际请求的 assets 前缀一起打出来：部署出问题时，这一行和上面的
          完整 URL 能直接对上是路径错了（404）、被中间层改了（返回 HTML）、
          还是压根没发出去（证书/CSP/COEP）。 */
-      outEl.value += '\n' + m.message + '\n（资源前缀 BASE = ' + BASE + '，' +
-        '可在控制台执行 fetch(BASE + "clang.wasm", {method: "HEAD"}).then(r => console.log(r.status, r.headers.get("content-type"), r.headers.get("content-length"))) 自查）\n';
+      outEl.value += '\n' + m.message + '\n（资源前缀 BASE = ' + BASE + '，这门语言要的资源：' +
+        Object.values(lang.assets).join('、') +
+        '；可在控制台执行 fetch(BASE + "资源名", {method: "HEAD"}).then(r => console.log(r.status, r.headers.get("content-type"), r.headers.get("content-length"))) 自查）\n';
       if (readyReject) readyReject(new Error(m.message));
       compileReject && compileReject({ jsError: m.message });
       break;
+    /* write / guest / exit：解释器型语言的运行结果也从这条通道回来 */
+    default: onRunMessage(m);
   }
 }
 
-let lastCompileMs = 0;
+/* 运行结果的公共入口。C++ 从一次性运行 Worker 来，解释器型语言（singleWorker）
+   从常驻的那个来，两条通道共用这一段。 */
+function onRunMessage(m) {
+  if (m.type === 'write') { pushBytes(new Uint8Array(m.bytes)); return; }
+  /* 只有调试构建会发这条：把用户模块那块共享线性内存交过来给悬停和观察窗读 */
+  if (m.type === 'guest') { setGuestMemory(m.sab); return; }
+  /* 解释器型语言的对应物：停住前递来的那一帧变量快照（C++ 不发这条） */
+  if (m.type === 'locals') {
+    dbg.pyLocals = { line: m.line, frame: m.frame, items: m.items };
+    /* 补全名单跟着这一帧走：C++ 那份来自插桩表（构建完就有），解释器型语言
+       停住时才知道这一帧有哪些名字，所以每递一份快照刷一次。 */
+    if (lang.valueChannel === 'locals') fillWatchNames(m.items.map((it) => ({ name: it.n })));
+    return;
+  }
+  if (m.type === 'exit') finishRun({ ...m, killed: false });
+}
+
+/* 一次运行只有一个出口：正常退出、看门狗超时、worker 报错、「停止」都走这里，
+   免得某条路径忘了清看门狗、忘了收 worker，或者忘了把 await 结掉。 */
+function finishRun(result) {
+  const pending = currentRun;
+  currentRun = null;
+  clearWatchdog();
+  if (lang.singleWorker) {
+    /* 常驻解释器正常跑完就留着下次接着用（重装一次要一两秒、十几 MB）。
+       只有真被 terminate 掉的才补一份：killed=超时、aborted=用户停止、
+       note=worker 自己报了内部错误。用户程序 sys.exit(非 0) 不算，解释器还活着。 */
+    if (pending && (result.killed || result.aborted || result.note)) startCompileWorker(true);
+  } else if (runWorker) {
+    runWorker.terminate();
+    runWorker = null;
+  }
+  if (pending) pending.resolve(result);
+}
+
 let compileResolve = null, compileReject = null;
 
 function compile(code, debug) {
   return new Promise((resolve, reject) => {
     compileResolve = resolve;
     compileReject = (err) => { reject(err); compileResolve = null; compileReject = null; };
-    const opts = {
+    const opts = lang.opts({
       std: $('std').value,
       optimize: $('opt').value,
       stackSize: parseInt($('stack').value, 10),
       flags: $('extra').value.split(/\s+/).filter(Boolean),
-      filename: 'main.cc', obj: 'main.o', output: 'main.wasm',
-      clang: ASSETS.clang, lld: ASSETS.lld,
-      debug: !!debug,
-    };
-    if (debug) { opts.obj = 'main.dbg.o'; opts.output = 'main.dbg.wasm'; }
+    }, debug);
     compileWorker.postMessage({ type: 'compile', code, opts });
   }).finally(() => { compileResolve = null; compileReject = null; });
 }
 
-function runProgram(wasmBytes, stdinText, timeoutMs, ctl) {
+function runProgram(artifact, stdinText, timeoutMs, ctl) {
   return new Promise((resolve) => {
-    if (runWorker) runWorker.terminate();
-    runWorker = new Worker('js/run.worker.js');
-    runWorker.onmessage = (ev) => {
-      const m = ev.data;
-      if (m.type === 'write') pushBytes(new Uint8Array(m.bytes));
-      /* 只有调试构建会发这条：把用户模块那块共享线性内存交过来给悬停和观察窗读 */
-      if (m.type === 'guest') setGuestMemory(m.sab);
-      if (m.type === 'exit') {
-        clearWatchdog();
-        runWorker.terminate();
-        runWorker = null;
-        resolve({ ...m, killed: false });
-      }
-    };
-    runWorker.onerror = (e) => {
-      clearWatchdog();
-      resolve({ code: 127, note: e.message, ms: 0, memoryBytes: 0, killed: false });
-    };
     currentRun = { resolve };
+    /* 解释器型语言不新建 worker：编译和运行是同一个常驻 worker，运行消息由
+       onCompileMessage 转给 onRunMessage。 */
+    if (!lang.singleWorker) {
+      if (runWorker) runWorker.terminate();
+      runWorker = new Worker(lang.runWorker);
+      runWorker.onmessage = (ev) => onRunMessage(ev.data);
+      runWorker.onerror = (e) => finishRun({ code: 127, note: e.message, ms: 0, memoryBytes: 0, killed: false });
+    }
     /* 调试会话（ctl 非空）不装看门狗：那是给人一步步看的，停在某行等人放行、
        降速睡过去都不该算成「程序在跑」。跑得慢或死循环也由用户自己用「停止 /
-       退出调试」结束（dbgStopRun 会结掉这个 await）。只有普通「编译并运行」
-       才按 运行超时(ms) 强杀 Worker。 */
+       退出调试」结束（dbgStopRun 会结掉这个 await）。只有普通运行才按
+       运行超时(ms) 强杀 Worker。 */
     if (!ctl) {
-      watchdog = setTimeout(() => {
-        runWorker.terminate();
-        runWorker = null;
-        resolve({ code: null, killed: true, ms: timeoutMs, memoryBytes: 0 });
-      }, timeoutMs);
+      watchdog = setTimeout(() => finishRun({ code: null, killed: true, ms: timeoutMs, memoryBytes: 0 }), timeoutMs);
     }
-    const buf = wasmBytes.buffer.slice(0);   /* 复制，原字节留给下次「仅运行」 */
-    runWorker.postMessage(
-      { type: 'run', base: BASE, name: 'main.wasm', stdin: enc.encode(stdinText), wasm: buf, ctl: ctl || null },
+    const buf = artifact.slice(0);   /* 复制，原字节留给下次「仅运行」 */
+    const w = lang.singleWorker ? compileWorker : runWorker;
+    w.postMessage(
+      { type: 'run', base: BASE, name: lang.runName, stdin: enc.encode(stdinText), artifact: buf, ctl: ctl || null },
       [buf]);
   });
 }
@@ -1245,7 +389,7 @@ let busy = false;
 async function doRun() {
   if (busy) return;
   busy = true;
-  runBtn.disabled = true; stopBtn.disabled = false;
+  runBtn.disabled = true; stopBtn.disabled = false; langSel.disabled = true;
   const t0 = performance.now();
   clearOutput();
   resetMetrics();
@@ -1254,32 +398,33 @@ async function doRun() {
   try {
     if (!workerReady) await readyPromise;
 
-    let wasm;
+    let built;
     try {
-      wasm = (await compile(srcEditor.getValue(), false)).wasm;
+      built = await compile(srcEditor.getValue(), false);
     } catch (err) {
       closeDecodeSession();
       setDot('bad');
       if (err.phase) {
         metric('compile', (err.ms || 0) + ' ms', 'err');
         metric('exit', err.exitCode === undefined ? '—' : err.exitCode, 'err');
-        say(`${err.phase === 'compile' ? '编译' : '链接'}失败`, 'err');
+        say(`${lang.phaseText[err.phase] || err.phase}失败`, 'err');
       } else if (err.jsError) {
         metric('compile', '异常', 'err');
-        say('编译器内部错误', 'err');
+        say('构建过程内部错误', 'err');
         outEl.value += '\n' + err.jsError + '\n';
       } else {
-        say('编译被中断', 'warn');
+        say(`${lang.phaseText.compile}被中断`, 'warn');
       }
       return;
     }
 
     const compileMs = Math.round(performance.now() - t0);
+    const kb = (built.size / 1024).toFixed(1);
     metric('compile', compileMs + ' ms', 'ok');
-    say(`编译完成（产物 ${(wasm.byteLength / 1024).toFixed(1)} KB），运行中…`);
+    say(`${lang.phaseText.compile}完成（产物 ${kb} KB），运行中…`);
 
     const timeoutMs = Math.max(200, parseInt($('timeout').value, 10) || 5000);
-    const r = await runProgram(wasm, stdinEl.value, timeoutMs);
+    const r = await runProgram(built.artifact, stdinEl.value, timeoutMs);
     closeDecodeSession();
 
     if (r.aborted) { say('已停止', 'warn'); return; }
@@ -1287,14 +432,14 @@ async function doRun() {
       setDot('bad');
       metric('run', '> ' + timeoutMs + ' ms', 'warn');
       metric('exit', 'TLE', 'warn');
-      say('运行超时，已终止该 wasm 实例', 'warn');
+      say(lang.killedText, 'warn');
       outEl.value += `\n[已终止] 运行超过 ${timeoutMs} ms\n`;
     } else {
       setDot(r.code === 0 ? 'ready' : 'bad');
       metric('exit', r.code, r.code === 0 ? 'ok' : 'err');
       metric('run', r.ms + ' ms', r.code === 0 ? '' : 'err');
       if (r.memoryBytes) metric('mem', (r.memoryBytes / 1048576).toFixed(1) + ' MB');
-      say(r.note ? '运行出错：' + r.note : `正常结束（产物 ${(wasm.byteLength / 1024).toFixed(1)} KB）`,
+      say(r.note ? '运行出错：' + r.note : `正常结束（产物 ${kb} KB）`,
           r.code === 0 ? 'ok' : 'err');
     }
     outEl.scrollTop = outEl.scrollHeight;
@@ -1303,6 +448,7 @@ async function doRun() {
     busy = false;
     runBtn.disabled = false;
     stopBtn.disabled = true;
+    langSel.disabled = false;
     updateSrcLen();
   }
 }
@@ -1349,6 +495,10 @@ const dbg = {
      SharedArrayBuffer 递过来（grow 之后会换一块新的，所以每次收都重建视图），
      数组展开和观察窗的表达式就按地址从这里读。 */
   guest: null, gdv: null,
+  /* 解释器型语言的值通道：堆在 Worker 里，主线程读不到，所以停住前由 Worker
+     递一份当前帧的变量快照过来（{line, frame, items}）。line 是这份快照属于
+     哪一行——读之前对一次当前行，免得把上一站的名字配到这一站的值上。 */
+  pyLocals: null,
 };
 
 function setGuestMemory(sab) {
@@ -1423,6 +573,10 @@ function syncBpTable() {
     const line = row + 1;
     if (line >= 0 && line <= DBG.MAX_LINE) dbg.bp[line] = 1;
   }
+  /* 断点表换版本了。C++ 的行桩每行都直接读 bp[]，不看这个槽；Python 的桩把断点
+     名单镜像成了 Python 自己的集合（每行跨 Python→JS 去查表太贵），靠版本号才知道
+     什么时候该重取。见 dbgproto.js 的 S.BPGEN。 */
+  Atomics.add(dbg.ctl, DBG.S.BPGEN, 1);
 }
 
 /* --- 当前执行行的画线 --- */
@@ -1921,6 +1075,58 @@ function varTipText(name, v, line) {
   return `${head} = ${fmtVar(v, lo, hi)}${note}`;
 }
 
+/* ------------------------------------------------------------------ */
+/* 解释器型语言的值通道                                                */
+/*                                                                    */
+/* 解释器的堆在 Worker 里，主线程按地址读不到，所以停住前由 Worker 递   */
+/* 一份当前帧的快照（{line, frame, items}，见 py.worker.js 的 PYSNAP）。 */
+/* 值已经是那边格式化好的文本：有界、不执行用户的 __repr__，这边只拼字， */
+/* 不再解释字节，也就没有 C++ 那套类型描述和求值器的事。                */
+/* ------------------------------------------------------------------ */
+
+/* 读之前对一次行号，并且要求真的停住了：快照属于哪一行是 Worker 说的，
+   控制块的当前行可能已经又往前走了（全速跑时两次轮询之间跨过几千行）。
+   对不上就当没有 —— 绝不把上一站的值配到这一站上。 */
+function snapshotAt(line) {
+  const L = dbg.pyLocals;
+  if (!L || L.line !== line) return null;
+  if (!dbg.ctl || Atomics.load(dbg.ctl, DBG.S.STATE) !== DBG.STATE.PARK) return null;
+  return L;
+}
+
+/* 截断了才补一句真实总数。省略号是 Worker 切原料时留下的记号，没切过的短值
+   再报一遍「共 5 个」只是噪音。单位按 kind 分：字符串报字符、字节串报字节。 */
+function pyCountNote(it) {
+  if (!it.c || it.v.indexOf('…') < 0) return '';
+  const unit = it.k === 'str' ? '个字符' : it.k === 'bytes' ? '个字节' : '个';
+  return `（共 ${it.c.toLocaleString('en-US')} ${unit}）`;
+}
+
+function pyTipText(it) {
+  return `${it.n} : ${it.t} = ${it.v}${pyCountNote(it)}`;
+}
+
+/* 观察窗本期只收单个变量名：式子（a[i]、x+1）要在解释器里 eval 才算得准，
+   拿 C++ 那套按地址算的求值器去套 Python 的名字，算出来的不是同一回事。
+   名字按 Unicode 标识符认（Python 3 允许 姓名 = '张三'），不是 ASCII 词字符。 */
+function isPlainName(s) {
+  return /^[\p{ID_Start}_][\p{ID_Continue}]*$/u.test(s);
+}
+
+function pyWatchValue(expr, line) {
+  const name = expr.trim();
+  if (!isPlainName(name)) {
+    return { ty: '—', val: '只支持单个变量名，表达式（a[i]、x+1）还没做', cls: 'off' };
+  }
+  const L = snapshotAt(line);
+  if (!L) return { ty: '—', val: '停住才有值（运行中不递快照）', cls: 'idle' };
+  const it = L.items.find((x) => x.n === name);
+  if (!it) return { ty: '—', val: `第 ${line} 行（${L.frame}）没有 ${name}`, cls: 'off' };
+  /* fit：值是那边写好的一整段文本，这边不量宽切片段，交给 .fit1 那条 CSS
+     单行收省略号，整句挂在 title 上（refreshWatch 每趟都写）。 */
+  return { ty: it.t, val: it.v + pyCountNote(it), cls: '', fit: true };
+}
+
 /* 悬浮框只有一个（.vartip）：停住时显示变量值，其余时候显示这行的执行次数。 */
 function showTip(text, ev) {
   varTipEl.textContent = text;
@@ -1958,13 +1164,30 @@ srcEditor.container.addEventListener('mousemove', (ev) => {
   let name = '';
   try {
     const pos = srcEditor.renderer.screenToTextCoordinates(ev.clientX, ev.clientY);
-    const tok = srcEditor.session.getTokenAt(pos.row, pos.column);
+    /* getTokenAt 收的是光标位（内部按「累计长度 >= column」挑 token，等于 1 基），
+       screenToTextCoordinates 给的是 0 基列号，差这一格的话每个标识符的第一个字符
+       都会落到前一个 token 上 —— 单字符名字（i、a、s）整格都取不到值。 */
+    const tok = srcEditor.session.getTokenAt(pos.row, pos.column + 1);
     if (tok && /^(identifier|variable|property)/.test(tok.type) && /^[\w$]+$/.test(tok.value)) {
       name = tok.value;
+    } else if (tok && lang.valueChannel === 'locals') {
+      /* Ace 的 python 高亮规则只认 ASCII 词字符，中文名字（姓名 = '张三'）落在
+         text token 上。这时拿快照当权威：整段 token 去掉空白正好是这一帧里的一个
+         名字就认它 —— 注释和字符串的 token 带着 # 和引号，配不上任何名字。 */
+      const L = snapshotAt(dbg.ctl[DBG.S.LINE]);
+      const w = tok.value.trim();
+      if (L && L.items.some((x) => x.n === w)) name = w;
     }
   } catch (e) { name = ''; }
   if (!name) { if (!heatTipAt(ev)) hideVarTip(); return; }
   const line = dbg.ctl[DBG.S.LINE];
+  if (lang.valueChannel === 'locals') {
+    const L = snapshotAt(line);
+    const it = L && L.items.find((x) => x.n === name);
+    if (!it) { if (!heatTipAt(ev)) hideVarTip(); return; }
+    showTip(pyTipText(it), ev);
+    return;
+  }
   const v = liveVarsAt(line).get(name);
   if (!v) { if (!heatTipAt(ev)) hideVarTip(); return; }
   showTip(varTipText(name, v, line), ev);
@@ -2615,7 +1838,8 @@ function evalNode(n, ctx) {
 /* 时退回固定 8 个。悬停框不参与测量（它不占面板的高度），仍给前 50 个  */
 /* 元素。                                                               */
 /* ------------------------------------------------------------------ */
-const WATCH_KEY = 'cpp-playground.watch';
+/* 名单按语言各存一份：C++ 的 a[i] 拿到 Python 那边全是「名字不在快照里」 */
+function watchKey() { return localKey('cpp-playground.watch', lang); }
 const WATCH_MAX = 24;
 const WATCH_ARR_N = 8;
 const WATCH_LEN = 80;
@@ -2629,7 +1853,7 @@ const watchItems = loadWatch();
 
 function loadWatch() {
   try {
-    const raw = JSON.parse(localStorage.getItem(WATCH_KEY) || '[]');
+    const raw = JSON.parse(localStorage.getItem(watchKey()) || '[]');
     if (!Array.isArray(raw)) return [];
     const out = [];
     for (const s of raw) {
@@ -2642,7 +1866,7 @@ function loadWatch() {
   } catch (e) { return []; }
 }
 function saveWatch() {
-  try { localStorage.setItem(WATCH_KEY, JSON.stringify(watchItems)); } catch (e) {}
+  try { localStorage.setItem(watchKey(), JSON.stringify(watchItems)); } catch (e) {}
 }
 
 /* 名字 -> 变量描述。优先要「当前行快照过的那个」：同名有多个 alloca（两个
@@ -2666,6 +1890,7 @@ function pickVar(name, line) {
    px 是这一行「值」那一列现在有多少像素宽，数组/字符串按它决定铺多少个。 */
 function watchValue(expr, line, px) {
   if (!dbg.active || !dbg.cb) return { ty: '—', val: '会话未开始', cls: 'idle' };
+  if (lang.valueChannel === 'locals') return pyWatchValue(expr, line);
   const p = parseWatch(expr);
   if (p.err) return { ty: '—', val: p.err, cls: 'off' };
   const ctx = { line: line, cb: dbg.cb, stale: '' };
@@ -2771,11 +1996,21 @@ function watchAdd() {
     watchEl.tip.className = 'wnote bad';
     return;
   }
-  const p = parseWatch(src);
-  if (p.err) {
-    watchEl.tip.textContent = `这句看不懂：${p.err}`;
-    watchEl.tip.className = 'wnote bad';
-    return;
+  if (lang.valueChannel === 'locals') {
+    /* 不走 C++ 那套词法器：它不认中文名字，而本期只收单个变量名，
+       「是不是一个名字」isPlainName 已经判完了。 */
+    if (!isPlainName(src)) {
+      watchEl.tip.textContent = '这门语言的观察窗本期只收单个变量名，表达式（a[i]、x+1）还没做';
+      watchEl.tip.className = 'wnote bad';
+      return;
+    }
+  } else {
+    const p = parseWatch(src);
+    if (p.err) {
+      watchEl.tip.textContent = `这句看不懂：${p.err}`;
+      watchEl.tip.className = 'wnote bad';
+      return;
+    }
   }
   if (!watchItems.includes(src)) {
     if (watchItems.length >= WATCH_MAX) {
@@ -2827,12 +2062,9 @@ $('watch-clear').onclick = () => {
 buildWatchRows();
 
 function dbgStopRun() {
-  if (runWorker) { runWorker.terminate(); runWorker = null; }
-  clearWatchdog();
-  if (currentRun) {
-    currentRun.resolve({ code: null, aborted: true, killed: false, ms: 0, memoryBytes: 0 });
-    currentRun = null;
-  }
+  /* terminate 之后必须把等待中的 run 结掉，否则 await 永远不返回，busy 卡住。
+     收 worker 和清看门狗都在 finishRun 里，和超时那条路共用一套。 */
+  finishRun({ code: null, aborted: true, killed: false, ms: 0, memoryBytes: 0 });
 }
 
 function dbgQuit() {
@@ -2849,12 +2081,12 @@ function dbgQuit() {
   dbgSyncMarkers(); dbgClearMarkerDivs();
   dbg.lastLine = -1; dbg.lastParked = null;
   dbg.cb = null; dbg.ctl = null; dbg.bp = null; dbg.lines = null; dbg.active = false;
-  dbg.vars = null; dbg.lineVars = null;
+  dbg.vars = null; dbg.lineVars = null; dbg.pyLocals = null;
   dbgBar.classList.remove('on');
   dbgState.textContent = '—';
   srcEditor.setReadOnly(false);
   runBtn.disabled = false;
-  debugBtn.disabled = false;
+  debugBtn.disabled = !lang.debug;
 }
 
 async function startDebugSession(built) {
@@ -2869,6 +2101,7 @@ async function startDebugSession(built) {
      会把「上一次运行留下的字节」当成这一轮的值报出来。运行 Worker 实例化好
      新模块后会把它的 SharedArrayBuffer 递过来（每次 park 前还会再对一遍）。 */
   setGuestMemory(null);
+  dbg.pyLocals = null;
   /* 新会话从空热力开始：上一轮的次数留在旧控制块里，行号却是按旧源码编的，
      混着画会指错热点。heat 是新建 SAB 上的一块，天生全 0，不用清。 */
   dbg.heatRows = lines;
@@ -2889,14 +2122,16 @@ async function startDebugSession(built) {
   debugBtn.disabled = false;      /* 再点一次 = 退出调试 */
   stopBtn.disabled = false;
   setDot('busy');
-  say(`调试构建完成，${lines.length} 个行桩、${dbg.vars.length} 个可查变量，已启动，正在跟踪执行行…`, 'ok');
+  /* 变量表只有做过静态变量名单的那门语言才有（C++ 从 DWARF 拿），Python 的变量是
+     停住时从帧里现取的，构建阶段给不出个数，这句话就不能报「0 个可查变量」。 */
+  say(`调试构建完成，${lines.length} 个行桩${dbg.vars.length ? `、${dbg.vars.length} 个可查变量` : ''}，已启动，正在跟踪执行行…`, 'ok');
   newDecodeSession();
   /* 用 setInterval 而不是 requestAnimationFrame：后台标签页里 rAF 会停摆，
      切去看输出再切回来时高亮就冻住了；50ms 一帧对手工单步足够跟手。 */
   dbg.timer = setInterval(dbgTick, 50);
 
   /* 调试会话没有运行超时（第 3 个参数只在非调试时用到，这里给 0 占位） */
-  const r = await runProgram(built.wasm, stdinEl.value, 0, cb.sab);
+  const r = await runProgram(built.artifact, stdinEl.value, 0, cb.sab);
   closeDecodeSession();
   if (dbg.timer) clearInterval(dbg.timer);
   dbg.timer = 0;
@@ -2929,12 +2164,15 @@ async function startDebugSession(built) {
 async function doDebug() {
   if (busy) return;
   if (dbg.active) { dbgStopRun(); dbgQuit(); return; }
+  /* 按钮本身是灰的，但 Ctrl+Shift+Enter 绕得过 disabled，这里再挡一道 */
+  if (!lang.debug) { say(lang.debugWhy, 'warn'); return; }
   if (!dbgSupported()) {
     setDot('bad');
     say('调试需要 SharedArrayBuffer：' + (sabMissing() || '条件看着都满足，可能被浏览器扩展拦了'), 'err');
     return;
   }
   busy = true;
+  langSel.disabled = true;
   const t0 = performance.now();
   clearOutput();
   resetMetrics();
@@ -2947,14 +2185,13 @@ async function doDebug() {
     } catch (err) {
       closeDecodeSession();
       setDot('bad');
-      const PHASE = { compile: '编译', link: '链接', instrument: '插桩' };
       if (err.phase) {
         metric('compile', (err.ms || 0) + ' ms', 'err');
         metric('exit', err.exitCode === undefined ? '—' : err.exitCode, 'err');
-        say(`${PHASE[err.phase] || err.phase}失败（调试构建）`, 'err');
+        say(`${lang.phaseText[err.phase] || err.phase}失败（调试构建）`, 'err');
       } else if (err.jsError) {
         metric('compile', '异常', 'err');
-        say('编译器内部错误', 'err');
+        say('构建过程内部错误', 'err');
         outEl.value += '\n' + err.jsError + '\n';
       } else {
         say('调试构建被中断', 'warn');
@@ -2965,7 +2202,7 @@ async function doDebug() {
     metric('compile', Math.round(performance.now() - t0) + ' ms', 'ok');
     if (!built.lines || !built.lines.length) {
       setDot('bad');
-      say('这个源文件里没有可插桩的用户代码行（只有头文件里的代码？）', 'err');
+      say('这个源文件里没有可执行的用户代码行（空文件、只有注释，或者全在头文件/库里？）', 'err');
       return;
     }
     await startDebugSession(built);
@@ -2974,6 +2211,8 @@ async function doDebug() {
     busy = false;
     runBtn.disabled = false;
     stopBtn.disabled = true;
+    langSel.disabled = false;
+    debugBtn.disabled = !lang.debug;
     updateSrcLen();
   }
 }
@@ -2983,11 +2222,12 @@ async function doDebug() {
 /* ------------------------------------------------------------------ */
 function fillExamples() {
   const sel = $('examples');
+  sel.textContent = '';
   /* 用例多了以后按分组挂 optgroup，下拉框里能直接看到课程章节；
-     分组顺序按「第一次出现」排，所以 EXAMPLES 的键序就是展示顺序。 */
+     分组顺序按「第一次出现」排，所以示例表的键序就是展示顺序。 */
   const groups = new Map();
-  for (const name of Object.keys(EXAMPLES)) {
-    const g = EXAMPLES[name].group || '其他';
+  for (const name of Object.keys(lang.examples)) {
+    const g = lang.examples[name].group || '其他';
     if (!groups.has(g)) {
       const og = document.createElement('optgroup');
       og.label = g;
@@ -2999,7 +2239,7 @@ function fillExamples() {
     groups.get(g).appendChild(o);
   }
   sel.onchange = () => {
-    const e = EXAMPLES[sel.value];
+    const e = lang.examples[sel.value];
     setSource(e.code);
     stdinEl.value = e.stdin;
     saveLocal();
@@ -3008,9 +2248,27 @@ function fillExamples() {
 
 function saveLocal() {
   try {
-    localStorage.setItem('cpp-playground.src', srcEditor.getValue());
-    localStorage.setItem('cpp-playground.stdin', stdinEl.value);
+    localStorage.setItem(localKey('cpp-playground.src', lang), srcEditor.getValue());
+    localStorage.setItem(localKey('cpp-playground.stdin', lang), stdinEl.value);
   } catch (e) { /* 忽略 */ }
+}
+
+/* 进页面 / 换语言时恢复这门语言上次留下的源码；没存过就用示例表的第一个 */
+function restoreLocal() {
+  let s = null, i = null;
+  try {
+    s = localStorage.getItem(localKey('cpp-playground.src', lang));
+    i = localStorage.getItem(localKey('cpp-playground.stdin', lang));
+  } catch (e) { /* 隐私模式读不到就算了 */ }
+  const first = Object.keys(lang.examples)[0];
+  $('examples').value = first;
+  if (s) {
+    setSource(s);
+    if (i !== null) stdinEl.value = i;
+    return;
+  }
+  setSource(lang.examples[first].code);
+  stdinEl.value = lang.examples[first].stdin;
 }
 
 srcEditor.on('change', () => { updateSrcLen(); saveLocal(); });
@@ -3083,17 +2341,77 @@ dbgSpeed.onchange = () => {
 };
 
 /* ------------------------------------------------------------------ */
-fillExamples();
-let restored = false;
-try {
-  const s = localStorage.getItem('cpp-playground.src');
-  const i = localStorage.getItem('cpp-playground.stdin');
-  if (s) { setSource(s); if (i !== null) stdinEl.value = i; restored = true; }
-} catch (e) { /* 忽略 */ }
-if (!restored) {
-  $('examples').value = Object.keys(EXAMPLES)[0];
-  setSource(EXAMPLES[$('examples').value].code);
-  stdinEl.value = EXAMPLES[$('examples').value].stdin;
+/* 语言切换                                                            */
+/*                                                                    */
+/* 页面上所有随语言变的东西都在这里刷一遍：标题、按钮文案、右栏小标题、 */
+/* 工具条上哪些字段露出来、示例表、本地存储、观察名单、常驻 worker。    */
+/* 登记表（langs.js）之外再加一门语言，这一段不用动。                   */
+/* ------------------------------------------------------------------ */
+const OPT_FIELDS = ['std', 'opt', 'extra', 'stack'];
+
+function applyLangChrome() {
+  const link = $('titlelink');
+  link.textContent = lang.title;
+  link.title = lang.titleTip;
+  document.title = lang.docTitle;
+  runBtn.textContent = lang.runLabel;
+  debugBtn.textContent = lang.debugLabel;
+  debugBtn.disabled = !lang.debug;
+  /* 按钮能点但只有一半能力（有行桩、没值通道）时，title 照样要说清缺的是哪一块 */
+  debugBtn.title = lang.debug && lang.values ? '' : lang.debugWhy;
+  reloadBtn.textContent = lang.reloadLabel;
+  $('srccap').textContent = `源代码 ${lang.filename}（Ctrl+Enter 运行）`;
+  $('stdinhint').textContent = lang.stdinHint;
+  $('lab-compile').textContent = lang.buildMetric;
+  $('lab-mem').textContent = lang.memLabel;
+  outEl.placeholder = `点「${lang.runLabel}」，或按 Ctrl+Enter`;
+  for (const id of OPT_FIELDS) $('f-' + id).hidden = lang.fields.indexOf(id) < 0;
+  /* 调试专属的那几样：没有单步调试的语言，留着也只是占地方。
+     观察窗再多看一格 values：值通道还没做的语言里它一栏算不出东西，与其整片
+     显示「会话未开始」，不如收起来，缺什么写在按钮 title 里。 */
+  $('f-dbspeed').hidden = !lang.debug;
+  $('f-bgm').hidden = !lang.debug;
+  $('heatbar').hidden = !lang.debug;
+  $('watchbox').hidden = !(lang.debug && lang.values);
+  /* 随语言换的文案：页脚「已知限制」和调试条那段悬停说明都按 data-lang 分份 */
+  for (const el of document.querySelectorAll('[data-lang]')) {
+    el.hidden = el.dataset.lang !== lang.id;
+  }
+  /* Ace 1.45 的 Editor 上没有 setMode，换语法要动 session */
+  srcEditor.session.setMode('ace/mode/' + lang.aceKey);
 }
+
+function setLang(id) {
+  const next = langById(id);
+  if (next.id === lang.id) return;
+  saveLocal();                       /* 先把上一门语言的源码和 stdin 存好 */
+  lang = next;
+  try { localStorage.setItem(LANG_KEY, lang.id); } catch (e) { /* 忽略 */ }
+  langSel.value = lang.id;
+  applyLangChrome();
+  clearOutput();
+  resetMetrics();
+  fillExamples();
+  restoreLocal();
+  /* 观察名单也是按语言存的，换一门就换一份 */
+  watchItems.length = 0;
+  for (const s of loadWatch()) watchItems.push(s);
+  buildWatchRows();
+  startCompileWorker();
+}
+
+for (const id of LANG_ORDER) {
+  const o = document.createElement('option');
+  o.value = id;
+  o.textContent = LANGS[id].label;
+  langSel.appendChild(o);
+}
+langSel.value = lang.id;
+langSel.onchange = () => setLang(langSel.value);
+
+/* ------------------------------------------------------------------ */
+applyLangChrome();
+fillExamples();
+restoreLocal();
 srcEditor.focus();
 startCompileWorker();
