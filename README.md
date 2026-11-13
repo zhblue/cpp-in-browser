@@ -20,14 +20,14 @@ python3 serve.py 8765
 
 下拉框切到 `Python` 是另一条独立的装载路径：首次约 12 MB（`pyodide.asm.wasm` 8.6 MB + `python_stdlib.zip` 2.4 MB + 胶水 1 MB），同样落在 `/assets/` 的长缓存里，第二次打开约 3 秒就绪（实测 `解释器就绪（3.1 s，Python 3.13.2 / Pyodide 0.29.5）`）。两套工具链各装各的，切来切去不用重新下载。
 
-换任何静态服务器都行，只要注意四点：`.wasm` 建议给 `application/wasm` 这个 MIME（不对的话会退化成先收完整字节再编译，能用但慢）；如果加了 CSP，必须允许 `'wasm-unsafe-eval'`（或 `'unsafe-eval'`），否则 wasm 编译本身会被拒；要用单步调试就必须带上 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`（`serve.py` 已经带上了）——没有这两个响应头就没有跨源隔离，`SharedArrayBuffer` 拿不到，调试器停不住；**而这两个头只在安全上下文里有效**：`http://公网域名` 下加满了头也不会有 `SharedArrayBuffer`，必须是 `https://`，或本机的 `http://localhost` / `http://127.0.0.1`。这条是 nginx 部署最容易踩的，见下面「部署建议」。
+换任何静态服务器都行，只要注意四点：`.wasm` 建议给 `application/wasm` 这个 MIME（给错了两条路都兜得住：C++ 侧退回「先收完整字节再编译」，Python 侧把同一个 body 流重包成正确类型继续流式编译，见 `py.worker.js` 的 `fixWasmMime`——能用，但配置该修还得修）；如果加了 CSP，必须允许 `'wasm-unsafe-eval'`（或 `'unsafe-eval'`），否则 wasm 编译本身会被拒；要用单步调试就必须带上 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`（`serve.py` 已经带上了）——没有这两个响应头就没有跨源隔离，`SharedArrayBuffer` 拿不到，调试器停不住；**而这两个头只在安全上下文里有效**：`http://公网域名` 下加满了头也不会有 `SharedArrayBuffer`，必须是 `https://`，或本机的 `http://localhost` / `http://127.0.0.1`。这条是 nginx 部署最容易踩的，见下面「部署建议」。
 
 ## 界面与操作
 
 | 控件 | 作用 |
 | --- | --- |
 | 语言 | `C++` / `Python`。切换时把当前语言的源码、stdin、观察窗名单各自存一份（`localStorage` 按语言分键，C++ 沿用不带后缀的老键，别的语言加 `.py` 之类后缀），来回切不丢。配色、字号、BGM 是全站偏好，不分语言。按钮文案、工具条字段、示例集、状态栏那格的叫法（编译耗时 / 语法检查，内存峰值 / 解释器堆）跟着换，详见下面「多语言与扩展点」 |
-| 示例 | C++ 22 个预置用例，下拉框按课程章节分成 11 组（`optgroup`）：慢速演示 / 排序（插入-冒泡-快排对比、归并 + 逆序对）/ 线性表（顺序表插入删除 + 二分、手写单链表逆置 + 快慢指针）/ 栈与队列（括号匹配 + 逆波兰求值、循环队列 + 约瑟夫环）/ 树（先中后序 + 层序、BST 插入删除 + 高度、合并果子堆）/ 图（邻接表 DFS/BFS、Dijkstra 最短路、并查集连通块）/ 查找与字符串（KMP next 表、散列表除留余数 + 拉链法）/ 竞赛风格（万能头演示）/ STL / 基础 / 演示。选中即同时填好源码和 stdin，比较交换次数这类输出都能手算复核。「手工冒泡排序」内置 30 个数据、手写双重循环（425 次比较 / 214 次交换），行桩触发次数多、当前行在几行之间反复推进，最适配合「每行停留」看慢动作。Python 一套 20 个，章节分组和算法与 C++ 那套对齐（合并果子用 `heapq`、BST 用递归插入删除、万能头和 STL 那三项换成 `读入 stdin + 中文输出` / `递归 + 大栈` / 三个演示用例），同一个算法两边各写一遍，可以对着看两种写法差多少 |
+| 示例 | C++ 39 个预置用例，下拉框按课程章节分成 15 组（`optgroup`）：慢速演示 / 排序（插入-冒泡-快排对比、归并 + 逆序对）/ 线性表（顺序表插入删除 + 二分、手写单链表逆置 + 快慢指针）/ 栈与队列（括号匹配 + 逆波兰求值、循环队列 + 约瑟夫环）/ 树（先中后序 + 层序、BST 插入删除 + 高度、合并果子堆）/ 图（邻接表 DFS/BFS、Dijkstra 最短路、并查集连通块）/ 查找与字符串（KMP next 表、散列表除留余数 + 拉链法）/ 竞赛风格（万能头演示）/ STL / 基础 / 演示 / 堆 / 哈希 / 回溯 / 复杂度。选中即同时填好源码和 stdin，比较交换次数这类输出都能手算复核。「手工冒泡排序」内置 30 个数据、手写双重循环（425 次比较 / 214 次交换），行桩触发次数多、当前行在几行之间反复推进，最适配合「每行停留」看慢动作。Python 一套 37 个，章节分组和算法与 C++ 那套对齐（合并果子用 `heapq`、BST 用递归插入删除、万能头和 STL 那两项换成 `读入 stdin + 中文输出` / `递归 + 大栈` / 三个演示用例），同一个算法两边各写一遍，可以对着看两种写法差多少。最后一批 17 条摘自《Hello 算法》（https://www.hello-algo.com/）：数组的栈上/堆上初始化、链表与双向链表、列表增删改查、栈/队列/双向队列、优先队列（大顶堆/小顶堆）、哈希表与 `hash()`、二叉树与 AVL 树、回溯框架、时间与空间复杂度。书里给的是片段（没 `main`、不打印），这里都补成了能直接跑的完整程序，两边同名同分组，可以对着看 C++ 手写指针和 Python 用对象差在哪。**除「STL」组外，C++ 侧的容器一律换成普通数组**：顺序表自己带 `len`、堆是自己写的数组版上浮/下沉、哈希表是「下标串起来」的链、图的邻接表是 `int adj[N][MAXD]` 这样的定长二维数组，插入删除都靠把后面的元素挪位置；「STL」组留着 `vector`/`set`/`map`/`sstream`，那几条本来就是给人看容器本身的 |
 | 标准 | `-std=c++11` / `c++14` / `c++17`（默认）/ `c++2a`。`c++11` 对着 HUSTOJ 判题机那条命令行；工具链是 LLVM 8 年代，`c++2a` 只覆盖到该快照已实现的部分 |
 | 优化 | `-O0` ～ `-O3`，默认 `-O0`。教学场景里默认不优化：单步停在的行号、悬浮看到的变量值都和源码一一对应（`-O2` 下变量被合并、循环被切开，行桩会跳来跳去）。要跑大数据压时间就手动切 `-O2`；「编译并调试」不受这个下拉框影响，本来就固定 `-O0 -g` |
 | 额外 cc1 参数 | 原样拼进 `clang -cc1`，默认 `-Wall -DONLINE_JUDGE`。`-DONLINE_JUDGE` 与 HUSTOJ 判题机同一条命令行，代码里 `#ifdef ONLINE_JUDGE` 的那一支（不 `freopen`、不打印多余提示）在这儿也走得到，删掉它就切回本地那一支。可加 `-Wextra`、`-DNDEBUG` 之类 |
@@ -201,8 +201,8 @@ cpp-wasm-playground/
 │   ├── compile.worker.js   常驻编译 Worker（C++）
 │   ├── run.worker.js       一次性运行 Worker（C++）
 │   ├── py.worker.js        常驻解释器 Worker（Python）：compile / marshal 产物 / 执行 / stdio 全在一个 worker 里
-│   ├── examples.cpp.js     C++ 示例集（22 个，纯数据）
-│   ├── examples.py.js      Python 示例集（20 个，与 C++ 那套章节对齐）
+│   ├── examples.cpp.js     C++ 示例集（39 个，纯数据）
+│   ├── examples.py.js      Python 示例集（37 个，与 C++ 那套章节对齐）
 │   ├── dbgproto.js         调试控制块（SharedArrayBuffer）布局：控制槽 / 断点表 / 变量值表 / 每行执行次数 / 数组快照，主线程与 Worker 共用一份定义
 │   └── main.js             UI 编排、Ace、指标、快捷键、localStorage
 ├── assets/                 工具链（C++ 约 60 MB + Python 约 12 MB，见下方致谢）
@@ -261,6 +261,23 @@ cpp-wasm-playground/
 # add_header Cross-Origin-Opener-Policy "same-origin" always;
 # add_header Cross-Origin-Embedder-Policy "require-corp" always;
 
+# MIME 只在 http 层补。同一层里 include 之后再写 types 是「叠加」，重复后缀只报一条
+# duplicate extension 警告、后写的生效；而换到 server / location 层写 types 是「整表
+# 替换」（ngx_http_core_merge_srv_conf: if (conf->types == NULL) conf->types = prev->types），
+# 那一层的 .js / .css / .html 会全部退回 default_type —— classic worker 的脚本 MIME
+# 不对直接加载失败，页面整个起不来。所以千万别把 types 挪进 server 块。
+http {
+    include       mime.types;
+    default_type  application/octet-stream;   # .tar 这类没登记的后缀走这里
+
+    types {
+        application/wasm          wasm;       # 新版 nginx 的 mime.types 已带，旧版（1.20 及更早）要自己加
+        application/octet-stream  tar;        # sysroot.tar；不写也由上面的 default_type 兜住
+    }
+
+    # ……下面两个 server 块放在这个 http 里
+}
+
 server {
     listen 80;
     server_name cpp.example.com;
@@ -273,8 +290,6 @@ server {
     root /var/www/cpp-wasm-playground;
     ssl_certificate     /etc/letsencrypt/live/cpp.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/cpp.example.com/privkey.pem;
-
-    types { application/wasm wasm; }           # 新版 nginx 的 mime.types 已带，旧版（1.20 及更早）要自己加
 
     location / {
         try_files $uri $uri/ =404;
@@ -296,6 +311,10 @@ server {
 ```
 
 `always` 别省：不带它时 `add_header` 只作用于 2xx/3xx/4xx 里的一部分状态码，出错页反而没有隔离头。改完配置要**硬刷新**（甚至清一次站点数据），文档响应会被缓存，旧的那份没头就等于没改。
+
+**`Incorrect response MIME type. Expected 'application/wasm'` 这一句怎么查。** 完整报错是 `TypeError: Failed to execute 'compile' on 'WebAssembly': Incorrect response MIME type. Expected 'application/wasm'.`——注意 `compileStreaming` 和 `instantiateStreaming` 报的是**同一句**（都写 `'compile'`），从文案认不出是哪个 API 调的，别顺着 `compile` 去找 `WebAssembly.compile`。先 `curl -I https://你的域名/assets/pyodide/pyodide.asm.wasm` 看 `Content-Type`：四个 wasm（`clang` / `lld` / `memfs` / `pyodide.asm`）都必须是 `application/wasm`。C++ 那侧的 `compile.worker.js` 一直自己判类型、不对就走 `arrayBuffer`，所以它不会抛这句；**Pyodide 0.29.5 的加载器没有兜底**——`pyodide.js` 里 `getInstantiateWasmFunc` 把 `fetch` 来的 Response 直接交给 `instantiateStreaming`，失败只 `console.warn("wasm instantiation failed!")`，于是解释器装不起来、页面上只看见「正在装入解释器…」一直转。`py.worker.js` 的 `fixWasmMime()` 在 `importScripts` 之前补上了这一层（类型对就原样走流式，不对就用同一个 body 流重包一个类型正确的 Response，仍然流式；回的是 HTML 或非 2xx 则报明确错误），所以服务器标错类型现在也能跑。
+
+**服务器改对了还报同一句，多半是缓存。** `/assets/` 打的是 `max-age=31536000`，改配置**之前**访问过的浏览器会把那份带错 `Content-Type` 的响应连同响应头一起存一年，nginx 改好也不会自动失效；CDN 边缘同理。处置顺序：浏览器硬刷新 / 清站点数据 → 刷 CDN 缓存 → 再 `curl -I` 复核。要让这类事故以后不再发生，给工具链文件名带上版本号（或内容哈希）再配长缓存，别给无版本 URL 打一年。
 
 如果以后把 `assets/` 挪到 CDN 或 OSS（另一个域名），`require-corp` 会连这些子资源一起拦：那边必须回 `Cross-Origin-Resource-Policy: cross-origin`（跨源 `fetch` 还要 `Access-Control-Allow-Origin`），否则要么退回同域，要么把页面的 COEP 换成 `credentialless`（Chrome/Edge 支持，Firefox 不支持，此时调试照样不可用，普通编译运行不受影响）。
 

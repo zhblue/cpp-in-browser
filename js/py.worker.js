@@ -462,12 +462,47 @@ function setStdin(text, out) {
   });
 }
 
+/* Pyodide 0.29.5 的加载器不看 Content-Type：pyodide.js 里 getInstantiateWasmFunc
+   把 fetch 来的 Response 直接交给 instantiateStreaming，失败还只 console.warn。
+   于是 nginx 没给 .wasm 登记后缀（回 text/plain），或者浏览器/CDN 还留着改配置
+   之前那份 max-age=31536000 的缓存，解释器就装不起来，页面上只看见「正在装入
+   解释器…」一直转，控制台里一句
+     TypeError: Failed to execute 'compile' on 'WebAssembly':
+     Incorrect response MIME type. Expected 'application/wasm'.
+   （compileStreaming 和 instantiateStreaming 报的是同一句，认不出是哪个调的。）
+   C++ 那侧的 compile.worker 早就自己判了类型、不对就走 arrayBuffer；这里给
+   Pyodide 补上同一层：类型对就原样走，不对就拿同一个 body 流重新包一个类型正确
+   的 Response —— 仍然是流式编译，不必先把 8.6 MB 读进内存。 */
+function fixWasmMime() {
+  const orig = WebAssembly.instantiateStreaming;
+  if (!orig) return;
+  WebAssembly.instantiateStreaming = async (src, imports) => {
+    const r = await src;
+    const type = (r.headers.get('content-type') || '').toLowerCase();
+    if (type.includes('application/wasm')) return orig(r, imports);
+    if (type.includes('html')) {
+      throw new Error(`pyodide.asm.wasm 返回的是 HTML 而不是 wasm（content-type: ${type}）。` +
+        '这是 nginx 的 try_files 把缺失文件回落到了 index.html，或 CDN 回了错误页——' +
+        '把 /assets/ 那个 location 的 try_files 去掉，让它老实报 404');
+    }
+    if (!r.ok) throw new Error(`pyodide.asm.wasm 取不到（HTTP ${r.status} ${r.statusText || ''}）`);
+    if (!r.body) return WebAssembly.instantiate(await r.arrayBuffer(), imports);
+    /* 只留 Content-Type：原响应的 Content-Length 是压缩后的字节数，跟解压后的
+       body 对不上，带过来反而误导。 */
+    return orig(new Response(r.body, {
+      status: r.status, statusText: r.statusText,
+      headers: { 'Content-Type': 'application/wasm' },
+    }), imports);
+  };
+}
+
 /* 版本钉在 0.29.5（CPython 3.13.2）：314 世代的加载器收到 classic worker 时是直接
    throw，而本页三个 worker 文件全是 classic（clang 那两个改 ES module 要连 importScripts
    一起动）。哪天要升 3.14，代价是把 py.worker 换成 module worker，不是换目录里的文件。 */
 async function init(m) {
   const indexURL = m.base + ((m.assets && m.assets.pyodide) || 'pyodide/');
   postMessage({ type: 'progress', text: '正在装入 Pyodide 解释器' });
+  fixWasmMime();
   importScripts(indexURL + 'pyodide.js');
   py = await loadPyodide({ indexURL: indexURL, packages: [] });
   py.runPython(BOOTSTRAP);

@@ -702,4 +702,724 @@ def report(rows):
 report([("甲", [90, 80]), ("乙", []), ("丙", [70])])
 `,
   },
+
+  /* ------------------------------------------------------------------ */
+  /* 下面这批摘自《Hello 算法》（https://www.hello-algo.com/）的示例代码， */
+  /* 分组和命名对着 examples.cpp.js 那一套来：同一个知识点，C++ 手写指针、 */
+  /* Python 用对象和标准库，可以左右对着看。                               */
+  /* ------------------------------------------------------------------ */
+  '数组：栈上与堆上初始化': {
+    group: '线性表',
+    stdin: '',
+    code: `# 《Hello 算法》「数组」一节：Python 没有「栈上 / 堆上」之分，
+# 它的「数组」就是 list。
+
+# 初始化数组
+arr: list[int] = [0] * 5   # [ 0, 0, 0, 0, 0 ]
+nums: list[int] = [1, 3, 2, 5, 4]
+print("数组：", arr)
+print("有初始值：", nums)
+
+# [0] * 5 是把同一个整数对象放进去五次，不是复制五份；
+# 整数不可变，所以改一项只影响这一项
+arr[2] = 99
+print("改 arr[2] 之后：", arr)
+
+# list 里可以放各种类型，和定长数组不一样
+mixed = [0, 0.0, 'a', False]
+print("混合类型：", mixed)
+`,
+  },
+  '链表：节点定义与构建': {
+    group: '线性表',
+    stdin: '',
+    code: `# 《Hello 算法》「链表」一节：节点由「值 + 指向下一个节点的引用」组成。
+# 数组靠下标定位，链表靠引用串起来；插删不用搬数据，代价是找第 k 个得一步步走。
+
+class ListNode:
+    """链表节点类"""
+    def __init__(self, val: int):
+        self.val: int = val               # 节点值
+        self.next: ListNode | None = None # 指向下一节点的引用
+
+
+# 初始化链表 1 -> 3 -> 2 -> 5 -> 4
+# 初始化各个节点
+n0 = ListNode(1)
+n1 = ListNode(3)
+n2 = ListNode(2)
+n3 = ListNode(5)
+n4 = ListNode(4)
+# 构建节点之间的引用
+n0.next = n1
+n1.next = n2
+n2.next = n3
+n3.next = n4
+
+# 遍历
+vals = []
+p = n0
+while p is not None:
+    vals.append(p.val)
+    p = p.next
+print("链表：", " -> ".join(str(v) for v in vals))
+print("长度：", len(vals))
+
+# 链表没有 size 字段，长度只能一步步数出来
+length = 0
+p = n0
+while p is not None:
+    length += 1
+    p = p.next
+print("再数一遍长度：", length)
+`,
+  },
+  '双向链表：节点定义与摘除': {
+    group: '线性表',
+    stdin: '',
+    code: `# 《Hello 算法》「常见链表类型」：单链表只能往前走，
+# 双向链表多一个 prev，删掉当前节点时不用再回头找前驱。
+
+class ListNode:
+    """双向链表节点类"""
+    def __init__(self, val: int):
+        self.val: int = val                # 节点值
+        self.next: ListNode | None = None  # 指向后继节点的引用
+        self.prev: ListNode | None = None  # 指向前驱节点的引用
+
+
+n0, n1, n2 = ListNode(1), ListNode(3), ListNode(2)
+n0.next, n1.prev = n1, n0
+n1.next, n2.prev = n2, n1
+
+# 正向
+vals, p = [], n0
+while p is not None:
+    vals.append(p.val)
+    p = p.next
+print("正向：", vals)
+
+# 反向
+vals, p = [], n2
+while p is not None:
+    vals.append(p.val)
+    p = p.prev
+print("反向：", vals)
+
+# 摘掉中间那个：prev / next 各改一次，不用从头找前驱
+n0.next = n1.next
+n1.next.prev = n0
+vals, p = [], n0
+while p is not None:
+    vals.append(p.val)
+    p = p.next
+print("删掉 3 之后正向：", vals)
+`,
+  },
+  '列表：增删改查与排序': {
+    group: '线性表',
+    stdin: '',
+    code: `# 《Hello 算法》「列表」一节：初始化、访问、更新、插入、删除、
+# 遍历、拼接、排序，八个动作挨个走一遍。
+
+# 初始化列表
+nums: list[int] = [1, 3, 2, 5, 4]
+nums1: list[int] = []           # 无初始值
+print("初始化：", nums)
+
+# 访问元素
+num: int = nums[1]               # 访问索引 1 处的元素
+print("索引 1 处：", num)
+# 更新元素
+nums[1] = 0                      # 将索引 1 处的元素更新为 0
+print("更新索引 1 之后：", nums)
+
+# 清空列表（先留着数据，下面还要用）
+saved = nums[:]
+nums.clear()
+print("清空之后：", nums)
+
+# 在尾部添加元素
+nums.append(1)
+nums.append(3)
+nums.append(2)
+nums.append(5)
+nums.append(4)
+# 在中间插入元素
+nums.insert(3, 6)               # 在索引 3 处插入数字 6
+print("插入 6 之后：", nums)
+# 删除元素
+nums.pop(3)                      # 删除索引 3 处的元素
+print("删掉索引 3 之后：", nums)
+
+# 遍历列表：通过索引遍历
+count = 0
+for i in range(len(nums)):
+    count += nums[i]
+print("按下标遍历求和：", count)
+# 直接遍历列表元素
+count = 0
+for x in nums:
+    count += x
+print("直接遍历求和：", count)
+
+# 拼接列表
+nums1: list[int] = [6, 8, 7, 10, 9]
+nums += nums1                    # 将列表 nums1 拼接到 nums 之后
+print("拼接之后：", nums)
+
+# 排序列表
+nums.sort()                      # 排序后，列表元素从小到大排列
+print("排序之后：", nums)
+print("一开始那份还在：", saved)
+`,
+  },
+  '栈的常用操作': {
+    group: '栈与队列',
+    stdin: '',
+    code: `# 《Hello 算法》「栈」一节：后进先出。
+# Python 没有内置的栈类，可以把 list 当作栈来使用。
+
+# 初始化栈
+stack: list[int] = []
+
+# 元素入栈
+stack.append(1)
+stack.append(3)
+stack.append(2)
+stack.append(5)
+stack.append(4)
+
+# 访问栈顶元素
+peek: int = stack[-1]
+print("栈顶：", peek)
+
+# 获取栈的长度 / 判断是否为空
+print("栈里", len(stack), "个，空吗？", "空" if not stack else "不空")
+
+# 元素出栈
+pop: int = stack.pop()
+print("弹出一个：", pop)
+
+# 一路弹到底，出来的是倒序
+print("出栈顺序：", end="")
+while stack:
+    print(" ", stack.pop())
+print()
+`,
+  },
+  '队列的常用操作': {
+    group: '栈与队列',
+    stdin: '',
+    code: `# 《Hello 算法》「队列」一节：先进先出。
+# 在 Python 中，我们一般将双向队列类 deque 当作队列使用；
+# 虽然 queue.Queue() 是纯正的队列类，但不太好用，因此不推荐。
+from collections import deque
+
+# 初始化队列
+que: deque[int] = deque()
+
+# 元素入队
+que.append(1)
+que.append(3)
+que.append(2)
+que.append(5)
+que.append(4)
+
+# 访问队首元素
+front: int = que[0]
+print("队首：", front)
+
+# 获取队列的长度 / 判断是否为空
+print("队列里", len(que), "个，空吗？", "空" if not que else "不空")
+
+# 元素出队
+pop: int = que.popleft()
+print("弹出一个：", pop)
+
+print("剩下的出队顺序：", end="")
+while que:
+    print(" ", que.popleft())
+print()
+`,
+  },
+  '双向队列的常用操作': {
+    group: '栈与队列',
+    stdin: '',
+    code: `# 《Hello 算法》「双向队列」一节：两头都能进出，既能当队列也能当栈。
+from collections import deque
+
+# 初始化双向队列
+deq: deque[int] = deque()
+
+# 元素入队
+deq.append(2)      # 添加至队尾
+deq.append(5)
+deq.append(4)
+deq.appendleft(3)  # 添加至队首
+deq.appendleft(1)
+
+# 访问元素
+front: int = deq[0]   # 队首元素
+rear: int = deq[-1]   # 队尾元素
+print("队首：", front, " 队尾：", rear)
+
+# 获取双向队列的长度 / 判断是否为空
+print("长度", len(deq), "，空吗？", "空" if not deq else "不空")
+
+# 元素出队
+pop_front: int = deq.popleft()   # 队首元素出队
+pop_rear: int = deq.pop()        # 队尾元素出队
+print("弹出队首", pop_front, "、队尾", pop_rear, "，剩下：", list(deq))
+`,
+  },
+  '优先队列（大顶堆 / 小顶堆）': {
+    group: '堆',
+    stdin: '',
+    code: `# 《Hello 算法》「堆」一节：Python 的 heapq 模块默认实现小顶堆。
+# 考虑将“元素取负”后再入堆，这样就可以将大小关系颠倒，从而实现大顶堆。
+# 在本示例中，flag = 1 时对应小顶堆，flag = -1 时对应大顶堆。
+import heapq
+
+# 初始化小顶堆
+min_heap, flag = [], 1
+# 初始化大顶堆
+max_heap, flag = [], -1
+
+# 元素入堆
+heapq.heappush(max_heap, flag * 1)
+heapq.heappush(max_heap, flag * 3)
+heapq.heappush(max_heap, flag * 2)
+heapq.heappush(max_heap, flag * 5)
+heapq.heappush(max_heap, flag * 4)
+
+# 获取堆顶元素
+peek: int = flag * max_heap[0]   # 5
+print("堆顶元素：", peek)
+
+# 获取堆大小 / 判断堆是否为空
+print("堆里", len(max_heap), "个，空吗？", "空" if not max_heap else "不空")
+
+# 堆顶元素出堆，出堆元素会形成一个从大到小的序列
+print("出堆顺序：", end="")
+while max_heap:
+    print(" ", flag * heapq.heappop(max_heap))
+print()
+
+# 输入列表并建堆
+min_heap2: list[int] = [1, 3, 2, 5, 4]
+heapq.heapify(min_heap2)
+print("小顶堆堆顶：", min_heap2[0])
+`,
+  },
+  '哈希表：增删查与遍历': {
+    group: '哈希',
+    stdin: '',
+    code: `# 《Hello 算法》「哈希表」一节：键值对存进去，按键查回来。
+# dict 保证按插入顺序遍历，下面直接打印即可。
+
+# 初始化哈希表
+hmap: dict = {}
+
+# 添加操作：在哈希表中添加键值对 (key, value)
+hmap[12836] = "小哈"
+hmap[15937] = "小啰"
+hmap[16750] = "小算"
+hmap[13276] = "小法"
+hmap[10583] = "小鸭"
+print("放进去", len(hmap), "项")
+
+# 查询操作：向哈希表中输入键 key，得到值 value
+name: str = hmap[15937]
+print("查 15937 ->", name)
+# Python 遇到不存在的键会抛 KeyError（不像 C++ 的 operator[] 那样顺手插一个空值），
+# 所以「查不到」要用 get，它不会改动表
+print("查 99999 ->", hmap.get(99999, "（键不存在）"))
+print("表里还是", len(hmap), "项")
+
+# 删除操作：在哈希表中删除键值对 (key, value)
+hmap.pop(10583)
+print("删掉 10583 之后还有", len(hmap), "项")
+
+# 遍历哈希表：遍历键值对 key->value
+for key, value in hmap.items():
+    print(" ", key, "->", value)
+`,
+  },
+  '内置哈希函数 hash()': {
+    group: '哈希',
+    stdin: '',
+    code: `# 《Hello 算法》「哈希算法」一节：hash() 把对象散列成一个整数，
+# 这个整数只配当字典的索引用，不是身份标识。
+# 字符串的哈希值每次运行都不一样：Python 故意加了随机盐，
+# 防的是有人故意构造键去撞哈希表（哈希碰撞攻击）。
+
+num = 3
+hash_num = hash(num)
+print("整数 3 的哈希值为", hash_num)
+
+bol = True
+hash_bol = hash(bol)
+print("布尔量 True 的哈希值为", hash_bol)
+
+dec = 3.14159
+hash_dec = hash(dec)
+print("小数 3.14159 的哈希值为", hash_dec)
+
+s = "Hello"
+hash_str = hash(s)
+print("字符串 Hello 的哈希值为", hash_str)
+
+tup = (12836, "小哈")
+hash_tup = hash(tup)
+print("元组 (12836, '小哈') 的哈希值为", hash_tup)
+
+print()
+print("注意：哈希值每次运行可能不同（字符串尤其明显），")
+print("判断两个对象是不是同一个，要比内容，不是比哈希值。")
+`,
+  },
+  '二叉树：初始化与节点插入删除': {
+    group: '树',
+    stdin: '',
+    code: `# 《Hello 算法》「二叉树」一节：节点由「值 + 左孩子 + 右孩子」组成。
+# 插入就是在父子之间插一个节点，删除就是把孩子接到父亲那边。
+
+class TreeNode:
+    """二叉树节点类"""
+    def __init__(self, val: int):
+        self.val: int = val                # 节点值
+        self.left: TreeNode | None = None  # 左子节点引用
+        self.right: TreeNode | None = None # 右子节点引用
+
+
+def in_order(node):
+    """中序遍历：左 -> 根 -> 右，出来就是升序"""
+    if node is None:
+        return []
+    return in_order(node.left) + [node.val] + in_order(node.right)
+
+
+# 初始化二叉树
+# 初始化节点
+n1 = TreeNode(val=1)
+n2 = TreeNode(val=2)
+n3 = TreeNode(val=3)
+n4 = TreeNode(val=4)
+n5 = TreeNode(val=5)
+# 构建节点之间的引用（指针）
+n1.left = n2
+n1.right = n3
+n2.left = n4
+n2.right = n5
+print("中序遍历：", in_order(n1))
+
+# 插入与删除节点
+p = TreeNode(0)
+# 在 n1 -> n2 中间插入节点 P
+n1.left = p
+p.left = n2
+print("插入 0 之后中序遍历：", in_order(n1))
+
+# 删除节点 P
+n1.left = n2
+print("删掉 0 之后中序遍历：", in_order(n1))
+`,
+  },
+  '二叉树的数组表示': {
+    group: '树',
+    stdin: '',
+    code: `# 《Hello 算法》「二叉树的数组表示」：二叉树摊平成一个列表，
+# 下标 i（从 0 起）的左孩子是 2i+1、右孩子是 2i+2，空位用 None 标记。
+# 省掉了引用，但只对完全二叉树天然合适。
+
+# 使用 None 来表示空位
+tree = [1, 2, 3, 4, None, 6, 7, 8, 9, None, None, 12, None, None, 15]
+
+print("下标 -> 值（None 是空位）：")
+for i, val in enumerate(tree):
+    line = f"  [{i}] "
+    if val is None:
+        print(line + "空")
+        continue
+    line += str(val)
+    l, r = 2 * i + 1, 2 * i + 2
+    if l < len(tree) and tree[l] is not None:
+        line += f"  左孩子 [{l}] = {tree[l]}"
+    if r < len(tree) and tree[r] is not None:
+        line += f"  右孩子 [{r}] = {tree[r]}"
+    print(line)
+`,
+  },
+  'AVL 树：节点、高度与平衡因子': {
+    group: '树',
+    stdin: '',
+    code: `# 《Hello 算法》「AVL 树」一节：AVL 树要求每个节点的左右子树高度差不超过 1，
+# 插进去发现失衡就旋转（左边高就右旋，右边高就左旋）。
+# 这里给出节点定义、节点高度和平衡因子，再拿一棵一路插左边的树算一遍，
+# 看看它是从哪一层开始失衡的。
+
+class TreeNode:
+    """AVL 树节点类"""
+    def __init__(self, val: int):
+        self.val: int = val                 # 节点值
+        self.height: int = 0                # 节点高度
+        self.left: TreeNode | None = None   # 左子节点引用
+        self.right: TreeNode | None = None  # 右子节点引用
+
+
+def height(node):
+    """节点高度"""
+    if node is None:
+        return 0
+    return node.height
+
+
+def balance_factor(node):
+    """节点平衡因子 = 左子树高度 - 右子树高度"""
+    if node is None:
+        return 0
+    return height(node.left) - height(node.right)
+
+
+def update_height(node):
+    """更新高度：孩子的高度得先算好，所以自底向上"""
+    if node is None:
+        return
+    update_height(node.left)
+    update_height(node.right)
+    node.height = max(height(node.left), height(node.right)) + 1
+
+
+def print_tree(node, depth=0):
+    if node is None:
+        return
+    print_tree(node.right, depth + 1)
+    flag = "  ← 失衡，该右旋了" if balance_factor(node) > 1 else ""
+    print("    " * depth + f"{node.val}（高 {node.height}，平衡因子 {balance_factor(node)}{flag}）")
+    print_tree(node.left, depth + 1)
+
+
+n1 = TreeNode(1)
+n2 = TreeNode(2)
+n3 = TreeNode(3)
+n4 = TreeNode(4)
+n1.left = n2
+n2.left = n3
+n3.left = n4
+
+update_height(n1)
+print_tree(n1)
+print()
+print("平衡因子绝对值超过 1 的节点就是失衡节点。")
+print("上面这棵树一路插到左边，失衡就从 2 那层开始了。")
+`,
+  },
+  '回溯算法框架': {
+    group: '回溯',
+    stdin: '',
+    code: `# 《Hello 算法》「回溯算法」一节：框架本身是空的，只有四步——
+# 判断是否为解、遍历所有选择、剪枝、尝试与回退。
+# 下面拿「从数组里挑出和为 target 的子集」把它填起来，
+# 四个函数正好对应框架里的四行。
+
+class State:
+    def __init__(self, nums, target):
+        self.nums = nums        # 待选数组
+        self.path = []          # 已经选中的下标
+        self.sum = 0            # 已选元素之和
+        self.target = target
+
+
+def is_solution(state):
+    """判断是否为解"""
+    return state.sum == state.target
+
+
+def record_solution(state, res):
+    """记录解"""
+    res.append([state.nums[i] for i in state.path])
+
+
+def is_valid(state, idx):
+    """剪枝：下标必须递增，否则同一个组合会被找到许多次"""
+    return not state.path or idx > state.path[-1]
+
+
+def make_choice(state, idx):
+    """尝试：做出选择，更新状态"""
+    state.path.append(idx)
+    state.sum += state.nums[idx]
+
+
+def undo_choice(state, idx):
+    """回退：撤销选择，恢复到之前的状态"""
+    state.path.pop()
+    state.sum -= state.nums[idx]
+
+
+def backtrack(state, choices, res):
+    """回溯算法框架"""
+    # 判断是否为解
+    if is_solution(state):
+        # 记录解
+        record_solution(state, res)
+        # 不再继续搜索
+        return
+    # 遍历所有选择
+    for choice in choices:
+        # 剪枝：判断选择是否合法
+        if is_valid(state, choice):
+            # 尝试：做出选择，更新状态
+            make_choice(state, choice)
+            backtrack(state, choices, res)
+            # 回退：撤销选择，恢复到之前的状态
+            undo_choice(state, choice)
+
+
+state = State([3, 4, 5, 6], 9)
+choices = [0, 1, 2, 3]
+res = []
+backtrack(state, choices, res)
+
+print(f"从 {state.nums} 里挑和为 {state.target} 的子集：")
+for one in res:
+    print("  " + " + ".join(str(x) for x in one))
+print("共", len(res), "种")
+`,
+  },
+  '时间复杂度各阶对照': {
+    group: '复杂度',
+    stdin: '',
+    code: `# 《Hello 算法》「时间复杂度」一节：把同一个 n 丢给不同阶的算法，
+# 看操作次数怎么长。次数是算出来的，不是真跑出来的——
+# 真跑 O(n!) 到 n=20 要 20! ≈ 2.4e18 次，没人等得起。
+import math
+
+
+def ops_const(n):
+    return 1
+
+
+def ops_linear(n):
+    return n
+
+
+def ops_quad(n):
+    return n * n
+
+
+def ops_log(n):
+    c = 0
+    while (1 << c) <= n:
+        c += 1
+    return c
+
+
+def ops_nlogn(n):
+    return n * ops_log(n)
+
+
+def ops_exp(n):
+    return 1 << n
+
+
+def ops_fact(n):
+    return math.factorial(n)
+
+
+print(f"{'n':>4}{'O(1)':>10}{'O(n)':>10}{'O(n^2)':>12}{'O(log n)':>12}{'O(n log n)':>14}{'O(2^n)':>14}{'O(n!)':>24}")
+for n in (10, 20):
+    print(f"{n:>4}{ops_const(n):>10}{ops_linear(n):>10}{ops_quad(n):>12}"
+          f"{ops_log(n):>12}{ops_nlogn(n):>14}{ops_exp(n):>14}{ops_fact(n):>24}")
+
+print()
+print("n 从 10 翻到 20（一倍的 n），操作次数慢了几倍：")
+print("  O(1)     不变")
+print("  O(n)     ", ops_linear(20) // ops_linear(10), "倍")
+print("  O(n^2)   ", ops_quad(20) // ops_quad(10), "倍")
+print("  O(2^n)   ", ops_exp(20) // ops_exp(10), "倍")
+print("  O(n!)    ", ops_fact(20) // ops_fact(10), "倍")
+`,
+  },
+  '空间复杂度：循环与递归': {
+    group: '复杂度',
+    stdin: '',
+    code: `# 《Hello 算法》「空间复杂度」一节：循环里的临时变量用完就还，
+# 递归每多调一层就多占一个栈帧，深 n 层就是 O(n)。
+
+def function() -> int:
+    """函数"""
+    # 执行某些操作...
+    return 0
+
+
+def loop(n: int):
+    """循环的空间复杂度为 O(1)"""
+    for _ in range(n):
+        function()
+
+
+deepest = 0
+
+
+def recur(n: int):
+    """递归的空间复杂度为 O(n)"""
+    global deepest
+    if n == 1:
+        return 1
+    r = recur(n - 1)
+    if n > deepest:          # 一路回溯上来，记下最深的一层
+        deepest = n
+    return r
+
+
+loop(1000000)
+print("循环跑完 1000000 次：栈帧始终只有一个，O(1)")
+
+recur(500)
+print("递归 500 层：最深用到第", deepest, "层栈帧，O(n)")
+print("（栈有上限：Python 默认递归上限 1000 层，再深就 RecursionError 了）")
+
+# 变量占多少空间也分 O(1) 和 O(n)
+a = 0                 # 暂存数据（常量，一般用大写字母表示）
+b = 0                 # 暂存数据（变量）
+c = [0] * 10000       # 长度固定，永远 O(1)
+d = [0] * 10000 if 10000 > 10 else []   # 长度随 n 变，就是 O(n)
+print("常量 a、变量 b、固定长度 10000 的列表 c：O(1)")
+print("长度随 n 增长的列表 d：O(n)")
+print("a=", a, "b=", b, "c[0]=", c[0], "d[9999]=", d[9999])
+`,
+  },
+  '多种基本数据类型初始化数组': {
+    group: '基础',
+    stdin: '',
+    code: `# 《Hello 算法》「基本数据类型」一节：Python 的列表能装各种类型，
+# 不像定长数组那样先定死元素类型。
+
+# 使用多种基本数据类型来初始化数组
+numbers: list[int] = [0] * 5
+decimals: list[float] = [0.0] * 5
+# Python 的字符实际上是长度为 1 的字符串
+characters: list[str] = ['0'] * 5
+bools: list[bool] = [False] * 5
+
+# Python 的列表可以自由存储各种基本数据类型和对象引用
+data = [0, 0.0, 'a', False]
+
+for i in range(5):
+    numbers[i] = i + 1
+    decimals[i] = i + 0.5
+    characters[i] = chr(ord('a') + i)
+    bools[i] = (i % 2 == 0)
+
+print("int   ：", numbers)
+print("float ：", decimals)
+print("str   ：", characters)
+print("bool  ：", bools)
+print("混合  ：", data)
+print()
+print("注意：Python 没有 char 类型，'a' 就是长度为 1 的字符串。")
+`,
+  },
 };
