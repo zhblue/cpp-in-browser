@@ -6,9 +6,13 @@
  * 调试会话时主线程会传一块 SharedArrayBuffer（布局见 dbgproto.js）。插桩过的
  * wasm 每执行一行源码就调用一次 env.__pg_trace(行号)，本文件里这个函数决定
  * “记一行 / 睡一会儿降速 / 停在这一行等主线程放行”。
+ *
+ * GoC 画图（见 js/goc.js）走的是同一块产物上的另一组宿主导入：__goc_* 调用在
+ * 这里攒成一批批绘图指令递给主线程的 canvas，动画的睡眠也睡在这里，所以主线程
+ * 照常刷新、照常能按暂停。
  */
 'use strict';
-importScripts('wasmclang.js', 'dbgproto.js');
+importScripts('wasmclang.js', 'dbgproto.js', 'goc.js');
 
 /* 行桩的宿主实现。放在闭包里，避免每次调用都重新取常量。
    判定、降速、停走握手都在 dbgproto.js 的共享核心里（Python 的 settrace 桩走的
@@ -74,6 +78,7 @@ self.onmessage = async (ev) => {
   const t0 = performance.now();
 
   let exit = { code: 127, memoryBytes: 0, note: 'startup-failed' };
+  let flushGoc = null;
 
   try {
     const memfs = new WasmClang.MemFS({
@@ -96,8 +101,6 @@ self.onmessage = async (ev) => {
 
     const module = await WebAssembly.compile(new Uint8Array(m.artifact));
 
-    /* 调试构建的模块会导入 env.__pg_trace / __pg_var / __pg_addr；没给控制块就退化成
-       空桩，至少程序还能跑完，不会变成一个看不懂的 LinkError。 */
     /* 用户内存要等 WasiApp 实例化完才拿得到，所以下面传的都是取值器/回调，
        不是内存本身。共享内存 grow 之后 buffer 会换成新的 SAB，主线程要的是
        「当前那块」，所以停住时按对象身份比一次，变了就再递一次。 */
@@ -110,24 +113,61 @@ self.onmessage = async (ev) => {
       sentSab = mem.buffer;
       postMessage({ type: 'guest', sab: sentSab });
     };
-    let extra = null;
-    if (m.ctl) {
-      const c = DBG.attachControlBlock(m.ctl);
-      extra = {
-        env: {
-          __pg_trace: makeTracer(c, postSab), __pg_var: makeVarWriter(c),
-          __pg_addr: makeAddrRec(c),
-        },
-      };
-      Atomics.store(c.ctl, DBG.S.STATE, DBG.STATE.EXEC);
-    } else {
-      const names = new Set(WebAssembly.Module.imports(module)
-        .filter((i) => i.module === 'env')
-        .map((i) => i.name));
-      if (names.has('__pg_trace') || names.has('__pg_var') || names.has('__pg_addr')) {
-        extra = { env: { __pg_trace: () => {}, __pg_var: () => {}, __pg_addr: () => {} } };
-      }
+    /* 每次停住（行桩命中断点/单步，或动画切片里被暂停）之前要递出去的东西有两样：
+       当前这块用户内存，和攒在 GOC 缓冲区里还没发的绘图指令。后者是「调试时画面跟
+       不上行号」的根因 —— 行桩的 park 在下一行的开头，绘图指令是上一行产生的，
+       不 flush 就得等到下一次睡觉或程序结束才看得见，而 `speed(10)` 的程序根本不睡。
+       flushGoc 这时候还没赋值（goc 在下面才建），所以只在调用时读它。 */
+    const parkFlush = () => {
+      postSab();
+      if (flushGoc) flushGoc();
+    };
+
+    /* 要挂哪些宿主导入，看产物自己声明了什么，不看源码 —— 编译和运行之间只传字节。
+       调试构建导入 env.__pg_*，include 过 goc.h/logo.h 的导入 env.__goc_*，
+       两组可能同时出现（一边单步一边画图）。 */
+    const envNames = [];
+    for (const i of WebAssembly.Module.imports(module)) {
+      if (i.module === 'env') envNames.push(i.name);
     }
+    const has = (n) => envNames.indexOf(n) >= 0;
+    const hasPg = has('__pg_trace') || has('__pg_var') || has('__pg_addr');
+    let hasGoc = false;
+    for (const n of envNames) if (n.indexOf('__goc_') === 0) { hasGoc = true; break; }
+
+    let c = null;
+    if (m.ctl) {
+      c = DBG.attachControlBlock(m.ctl);
+      Atomics.store(c.ctl, DBG.S.STATE, DBG.STATE.EXEC);
+    }
+
+    /* 一笔一笔走动画的时候也要听得见用户：makeEnv 拿的是同一份调试控制块，
+       每睡醒一片问一次「是不是按下了暂停」。断点和单步不在这里判 —— 那是行桩
+       在行边界干的活，切片里重复判会因为 MODE/断点表一直保持而反复停住同一行。 */
+    const goc = (hasGoc && typeof GOC !== 'undefined')
+      ? GOC.makeEnv({
+        mem: getMem,
+        post: (ops) => postMessage({ type: 'goc', ops }),
+        ctl: m.goc ? new Int32Array(m.goc) : null,
+        dbg: c,
+        onPark: parkFlush,
+      })
+      : null;
+
+    const env = {};
+    if (hasPg) {
+      /* 调试构建但没给控制块：退化成空桩，至少程序还能跑完，
+         不会变成一个看不懂的 LinkError。 */
+      Object.assign(env, c
+        ? {
+          __pg_trace: makeTracer(c, parkFlush), __pg_var: makeVarWriter(c),
+          __pg_addr: makeAddrRec(c),
+        }
+        : { __pg_trace: () => {}, __pg_var: () => {}, __pg_addr: () => {} });
+    }
+    if (goc) Object.assign(env, goc.env);
+    if (goc) flushGoc = goc.flush;
+    const extra = (hasPg || goc) ? { env: env } : null;
 
     app = extra
       ? new WasmClang.WasiApp(module, memfs, m.name || 'main.wasm', extra)
@@ -145,6 +185,12 @@ self.onmessage = async (ev) => {
       memoryBytes: 0,
       note: String((e && e.message) || e),
     };
+  }
+
+  /* 攒在缓冲区里没发的最后几条指令要补上，否则程序末尾那几笔（往往是 pen.text
+     或者最后一条 fd）永远看不到 —— 主线程收到 exit 就把这次运行收尾了。 */
+  if (flushGoc) {
+    try { flushGoc(); } catch (e) { /* 已经要退出了，别再制造第二条错误 */ }
   }
 
   postMessage({

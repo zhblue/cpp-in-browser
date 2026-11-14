@@ -482,6 +482,14 @@
     '-ferror-limit', '19',
     '-fmessage-length', '80',
     '-fno-color-diagnostics',
+    /* 这份 clang 8 的 wasm32 后端选不出「线程安全局部 static」要用的那条原子指令
+       （AtomicLoad acquire），所以函数里只要有一个需要动态初始化的局部 static，
+       编译就死在 fatal error: error in backend: Cannot select，报不出源码行号。
+       关掉线程安全初始化既绕开这个坑，也符合事实：跑出来的 wasm 只有一个线程，
+       初始化只发生在 _start 之前的单线程阶段。代价是「两个线程同时首次进入」这种
+       场景不再安全 —— 而这里根本不存在第二个线程。名字带 f，写成
+       -no-threadsafe-statics 是「unknown argument」，整页编译全挂。 */
+    '-fno-threadsafe-statics',
   ];
 
   /* ------------------------------------------------------------------ */
@@ -1064,8 +1072,10 @@
         const n = tar.untar(this.memfs);
         /* 补一个 <bits/stdc++.h>，见上面 UMBRELLA_* 的说明 */
         const extra = addUmbrellaHeader(this.memfs);
-        this.options.onProgress && this.options.onProgress(`已装入 ${n + extra} 个头文件/库`);
-        this.sysrootFiles = n + extra;
+        /* 再补 goc.h / logo.h：GoC 那套画笔 API（见 js/goc.js 的开头） */
+        const goc = global.GOC ? global.GOC.insert(this.memfs) : 0;
+        this.options.onProgress && this.options.onProgress(`已装入 ${n + extra + goc} 个头文件/库`);
+        this.sysrootFiles = n + extra + goc;
         this.initMs = Date.now() - t0;
       })();
       return this.ready;
@@ -1119,7 +1129,11 @@
       }
 
       const lld = await this.getModule(o.lld || 'lld.wasm');
-      const lres = await this.link(obj, out, stackSize, lld);
+      /* include 了 goc.h / logo.h 的话，__goc_* 那组宿主函数在库里没有定义，
+         要让 wasm-ld 放行未定义符号，链接后它们变成 env.__goc_* 导入，
+         运行时由 js/goc.js 在 Worker 里实现（见 js/goc.js 开头）。 */
+      const gocFlags = (global.GOC && global.GOC.ldFlags) ? global.GOC.ldFlags(source) : [];
+      const lres = await this.link(obj, out, stackSize, lld, gocFlags);
       if (lres.code !== 0 || !this.memfs.hasFile(out)) {
         return { ok: false, phase: 'link', exitCode: lres.code, wasm: null };
       }

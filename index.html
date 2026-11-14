@@ -106,6 +106,21 @@
   #out { background: var(--out-bg); color: var(--out-fg); }
   textarea:focus { outline: none; border-color: var(--acc); }
 
+  /* ---------- GoC 画布（垫在 stdout 背后，见 js/goc.js） ---------- */
+  /* 一个不占额外空间的定位容器：canvas 绝对居中，textarea 照旧铺满，
+     所以不画图时和原来一模一样，一点痕迹都没有。 */
+  .outwrap { position: relative; flex: 1; min-height: 0; display: flex; border-radius: 8px; }
+  .outwrap > textarea { flex: 1; }
+  #gocv {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: none; pointer-events: none; border-radius: 4px;
+  }
+  /* 画面一出现就换成 GoC 那块浅绿底：整框都铺上，免得文字压在深浅交界上。
+     墨色跟着换成深绿黑 —— 底色是固定的浅色，所以白天/夜晚两套主题共用一个值。 */
+  .outwrap.goc { background: rgb(188, 255, 209); }
+  .outwrap.goc #gocv { box-shadow: 0 0 0 1px rgba(0, 0, 0, .16); }
+  #out.goc { background: transparent; color: #12271c; border-color: rgba(0, 0, 0, .25); }
+
   /* ---------- 状态面板 ---------- */
   .metrics {
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -410,7 +425,10 @@
         <span>输出 stdout / stderr</span>
         <span class="cap-right"><span id="outlen"></span><button id="clear" class="danger mini">清空输出</button></span>
       </div>
-      <textarea id="out" spellcheck="false" readonly placeholder="点「编译并运行」，或按 Ctrl+Enter"></textarea>
+      <div class="outwrap" id="outwrap">
+        <canvas id="gocv" width="800" height="800"></canvas>
+        <textarea id="out" spellcheck="false" readonly placeholder="点「编译并运行」，或按 Ctrl+Enter"></textarea>
+      </div>
     </section>
   </div>
 </main>
@@ -425,6 +443,12 @@
       <li>超时靠 <code>worker.terminate()</code> 实现，能杀掉死循环，但拿不到精确 CPU 时间。</li>
       <li>wasm 线性内存无法由宿主设上限；超分会以 <code>memory access out of bounds</code> 报出。</li>
       <li><code>system()</code>、<code>fork()</code>、管道一类进程 API 不存在。</li>
+      <li><b>GoC 画图</b>：写 <code>#include &lt;goc.h&gt;</code>（老教材的 <code>#include "logo.h"</code> 也认）就能用画笔，画布 800&times;800、原点在正中、0 度朝正上方，画在输出框背后，只有真画了东西才露出来，「清空输出」连画布一起擦。画笔状态存在编译出来的 wasm 里，所以调试时悬停、观察窗看到的 <code>x</code> <code>y</code> <code>angle</code> 就是笔的真位置。</li>
+      <li>这版 GoC 的动作都要写成 <code>pen.fd(100)</code>，没有 webGoC 那句裸的 <code>fd(100)</code>；<code>&lt;cmath&gt;</code> 的 <code>sin/cos</code> 照旧收弧度，角度版另叫 <code>sin_deg</code> <code>cos_deg</code> <code>atan2_deg</code>（<code>rand</code>/<code>srand</code> 相反，就是 GoC 那台线性同余）。<b>没有</b>图片、声音、视频、按钮、联机那一整块，没有 <code>getKey</code>/<code>getMX</code>/<code>mouseDown</code> 这类键盘鼠标读数，没有 <code>fill</code> 溢色填充，小海龟的脑袋也不画（<code>show/hide</code> 只留接口）。这些名字不在头文件里，写错<b>当场编译不过</b>，不会跑一半才炸。</li>
+      <li>带画图的运行换了超时口径：一笔都还没画出来时仍是「总共跑 N 秒」，画第一笔之后改成「连续 N 秒没有动静才算超时」——否则 <code>speed</code> 的分段动画会被自己的慢动作耗死。<b>转身、<code>wait()</code>、<code>pause()</code> 这几段一条绘图指令都不产生</b>，所以睡眠循环每 100 ms 递一个只装心跳的空批次过去重新计时（纯心跳不会把画布亮出来，只转身不画图的程序看不到绿底板子）。代价是 <code>while (1) wait(0.1);</code> 这种「一直有节奏地空转」的画图程序不再会被超时杀掉，只能按「停止」。</li>
+      <li>调试和动画用的是同一套停走握手，但分工是清楚的：<b>笔尖正走到一半按下「暂停」，最多一片（50 ms）就停住</b>，放行后这一笔剩下的段继续画完；断点和「下一行」只在行边界生效——一行动画要睡几十片，若在每片里重复判同一个断点，一次「继续」只放行 50 ms、下一片又以同一个理由停在同一行，那段动画永远跑不完。</li>
+      <li>检测到 <code>goc.h</code> 才会给链接器加 <code>--allow-undefined</code>（画图函数是宿主提供的导入，链接期本来就没有定义）。代价是这条旗也放过拼错的函数名：错误从链接期挪到运行期，提示写在输出里。不带画图的普通程序不受影响。</li>
+      <li>编译固定带 <code>-fno-threadsafe-statics</code>：这份 clang 8 的 wasm32 后端选不出「线程安全局部 static」要用的原子指令，函数里只要有一个需要动态初始化的 <code>static</code> 就死在 <code>error in backend: Cannot select</code> 且报不出行号。跑出来的 wasm 只有一个线程，去掉守卫不影响正确性，但两个线程同时首次进入那种写法在这里本来也不成立。</li>
       <li>调试构建固定 <code>-O0</code>（优化会把语句合并、行边界打乱），并且只给用户自己这份源文件里的行插桩：STL 内部下不了断点。降速的亚毫秒档位是按行累计后取整到 1 ms 睡的，不是单行精确计时。悬停看变量值覆盖 POD（整型、浮点、指针、bool、char）和<b>定长数组</b>（<code>int a[30]</code>、<code>double m[4][4]</code> 这类，元素是标量或指针时铺开前 50 个，多维按行优先摊平；<code>char s[n]</code> 整段都是可显示文字时直接写成 <code>"hello"</code> 一句，按第一个 0 收尾，掺了控制字符或非法 UTF-8 才退回逐个元素报数）；<code>std::string</code>、容器、结构体（以及元素是结构体的数组）只报名字不展开内容，指针也只显示线性内存地址而不追字符串，<code>int a[]</code> 形参和变长数组没有长度信息、同样只显示地址。观察窗收的是表达式，但求值器只读内存、不执行代码：<code>a[i]</code> <code>a[10]</code> <code>m[1][2]</code> <code>*p</code> <code>p[i]</code> <code>&amp;x</code> <code>a+j</code>、四则/比较/逻辑/位运算、三元、类型转换都能算（值由主线程按 <code>__pg_addr</code> 登记的栈槽地址直接读共享内存，和悬停用的是同一份数据）；<b>成员访问</b>（<code>s.x</code>、<code>p-&gt;v</code>）、<b>函数调用</b>（<code>v.size()</code>）、<b>全局变量</b>（插桩只收 <code>llvm.dbg.declare</code> 覆盖的局部变量）、字符串字面量、<code>++/--</code>、<code>sizeof</code> 都算不了，会直接把原因写在那一行。下标越界不检查（C++ 本来也不检查），读到的是相邻内存。变量按「声明行 &le; 当前行」判定可见，块作用域结束后仍可能被列出来，值是它最后一次被写入的那份。条件、循环体、自增全写在同一行的 <code>for</code>，整趟循环只触发行桩一次（热力停在最浅档、按一次「下一行」就走完），循环体另起一行才准。</li>
     </ul>
     <ul data-lang="py" hidden>
@@ -444,6 +468,7 @@
 <script src="vendor/ace/ace.js"></script>
 <script src="vendor/ace/ext-language_tools.js"></script>
 <script src="js/dbgproto.js"></script>
+<script src="js/goc.js"></script>
 <script src="js/examples.cpp.js"></script>
 <script src="js/examples.py.js"></script>
 <script src="js/langs.js"></script>

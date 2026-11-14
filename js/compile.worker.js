@@ -4,7 +4,9 @@
  * 超时或出错时不需要重建它（运行用户程序用的是另一个一次性 Worker）。
  */
 'use strict';
-importScripts('wasmclang.js');
+/* goc.js 要在 wasmclang.js 之前：Toolchain.init() 会拿 global.GOC 往 memfs 里
+   补 goc.h / logo.h。这里只用它的头文件文本，画布那两半在 Worker 里不碰 DOM。 */
+importScripts('goc.js', 'wasmclang.js');
 
 let tc = null;
 let initing = null;

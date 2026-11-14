@@ -198,12 +198,15 @@ function closeDecodeSession() {
 }
 
 /* 每次点「编译并运行 / 编译并调试」都从空输出开始。丢弃上一次的解码头，
-   免得它把残留的半个多字节序列刷进新框；输出长度计数一并清零。 */
+   免得它把残留的半个多字节序列刷进新框；输出长度计数一并清零。
+   GoC 的图也一起收掉：编译那一两秒里留着上一张图，会让人以为新程序画的就是它。
+   这里传 null —— 本次运行的控制块要等 runProgram 现造，pause() 不能拿着上一次的。 */
 function clearOutput() {
   decoder = null;
   outEl.value = '';
   outEl.scrollTop = 0;
   $('outlen').textContent = '';
+  if (typeof GOC !== 'undefined') GOC.reset(null);
 }
 
 function say(text, cls) {
@@ -238,6 +241,12 @@ let readyPromise = new Promise((res, rej) => { readyResolve = res; readyReject =
 let runWorker = null;
 let watchdog = null;
 let currentRun = null;
+
+/* GoC 画图：watchdogMs 是本次运行的超时窗口（0 = 调试会话，不设看门狗），
+   gocCtl 是递给 Worker 的那块「有人点了一下」共享内存（没有跨源隔离时为 null，
+   画图照旧，只是不等点击、不睡觉）。见 js/goc.js。 */
+let watchdogMs = 0;
+let gocCtl = null;
 
 function startCompileWorker(quiet) {
   workerReady = false;
@@ -301,6 +310,8 @@ function onCompileMessage(ev) {
    从常驻的那个来，两条通道共用这一段。 */
 function onRunMessage(m) {
   if (m.type === 'write') { pushBytes(new Uint8Array(m.bytes)); return; }
+  /* GoC 的一批绘图指令：直接画到 stdout 背后那块 canvas 上 */
+  if (m.type === 'goc') { GOC.applyOps(m.ops); bumpWatchdog(); return; }
   /* 只有调试构建会发这条：把用户模块那块共享线性内存交过来给悬停和观察窗读 */
   if (m.type === 'guest') { setGuestMemory(m.sab); return; }
   /* 解释器型语言的对应物：停住前递来的那一帧变量快照（C++ 不发这条） */
@@ -359,19 +370,45 @@ function runProgram(artifact, stdinText, timeoutMs, ctl) {
       runWorker.onmessage = (ev) => onRunMessage(ev.data);
       runWorker.onerror = (e) => finishRun({ code: 127, note: e.message, ms: 0, memoryBytes: 0, killed: false });
     }
+    /* 每次运行都换一块新的画图控制块（点击计数从零开始），顺带把上一次的画面
+       收起来。程序没画图时这一步看不出来：画布保持隐藏，等第一条指令才露出来。 */
+    gocCtl = GOC.newCtl();
+    GOC.reset(gocCtl);
     /* 调试会话（ctl 非空）不装看门狗：那是给人一步步看的，停在某行等人放行、
        降速睡过去都不该算成「程序在跑」。跑得慢或死循环也由用户自己用「停止 /
        退出调试」结束（dbgStopRun 会结掉这个 await）。只有普通运行才按
        运行超时(ms) 强杀 Worker。 */
     if (!ctl) {
-      watchdog = setTimeout(() => finishRun({ code: null, killed: true, ms: timeoutMs, memoryBytes: 0 }), timeoutMs);
+      watchdogMs = timeoutMs;
+      armWatchdog();
+    } else {
+      watchdogMs = 0;
     }
     const buf = artifact.slice(0);   /* 复制，原字节留给下次「仅运行」 */
     const w = lang.singleWorker ? compileWorker : runWorker;
     w.postMessage(
-      { type: 'run', base: BASE, name: lang.runName, stdin: enc.encode(stdinText), artifact: buf, ctl: ctl || null },
+      {
+        type: 'run', base: BASE, name: lang.runName, stdin: enc.encode(stdinText),
+        artifact: buf, ctl: ctl || null, goc: gocCtl,
+      },
       [buf]);
   });
+}
+
+/* 看门狗。普通运行原本是「从头到尾最多跑这么久」；一旦这个程序在画图，就改成
+   「多久没有动静」—— 动画每 20 ms 一帧、一帧一条消息，画面一直在长就不算卡死
+   （否则一个 speed=5 的螺旋会被 5 秒的默认超时砍在半道上）。代价是「不停地画
+   的死循环」只能靠「停止」结束，这一点在页面底部的已知限制里写明了。 */
+function armWatchdog() {
+  clearWatchdog();
+  if (!watchdogMs) return;
+  watchdog = setTimeout(() => finishRun({ code: null, killed: true, ms: watchdogMs, memoryBytes: 0 }), watchdogMs);
+}
+
+/* 收到一批绘图指令：从这一刻起按「静默时长」重新计时 */
+function bumpWatchdog() {
+  if (!watchdogMs) return;      /* 调试会话没有看门狗，也不该有 */
+  armWatchdog();
 }
 
 function clearWatchdog() {
@@ -2324,7 +2361,10 @@ document.addEventListener('keydown', (e) => {
 runBtn.onclick = doRun;
 debugBtn.onclick = doDebug;
 stopBtn.onclick = stopAll;
-clearBtn.onclick = () => { outEl.value = ''; $('outlen').textContent = ''; };
+/* 「清空输出」也得擦画布：GoC 的图就垫在输出框背后，只清文字会留下一张旧图。
+   reset 顺手把画布藏回去，下一条画图指令再露出来；把本次运行的控制块原样传回去，
+   pause() 正等着的那只手不能因为点了清屏就断掉。 */
+clearBtn.onclick = () => { outEl.value = ''; $('outlen').textContent = ''; GOC.reset(gocCtl); };
 reloadBtn.onclick = () => {
   if (dbg.active) { dbgStopRun(); dbgQuit(); }
   outEl.value = '';
@@ -2413,5 +2453,9 @@ langSel.onchange = () => setLang(langSel.value);
 applyLangChrome();
 fillExamples();
 restoreLocal();
+/* GoC 画布：绑上 stdout 背后那块 canvas，顺便把「点一下 / 按一键」的唤醒
+   监听挂好。没有画图指令时它一直是 display:none，界面上看不出来。 */
+GOC.setup({ canvas: $('gocv'), out: outEl, wrap: $('outwrap') });
+GOC.reset(null);
 srcEditor.focus();
 startCompileWorker();

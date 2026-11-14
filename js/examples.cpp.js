@@ -1908,4 +1908,1773 @@ int main() {
 }
 `,
   },
+  /* ------------------------------------------------------------------ */
+  /* 下面这批补齐经典算法教程的算法主线：各章教程里都要讲、又适合用      */
+  /* 普通数组写清楚的算法。参考 OI Wiki、GeeksforGeeks DSA Roadmap、     */
+  /* VisuAlgo 章节表、《Hello 算法》与国内数据结构教材的目录；           */
+  /* C++ 侧一律定长数组 + 下标，不用 vector / queue / map / new，        */
+  /* 结构体数组、游标数组、二维数组都算数组实现。Python 侧逐条对照。     */
+  /* ------------------------------------------------------------------ */
+  '选择排序 + 希尔排序': {
+    group: '排序',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+void show(const char* tag, const int a[], int n) {
+    printf("%s", tag);
+    for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+    printf("\\n");
+}
+
+/* 选择排序：每趟从 [i,n) 里挑最小的换到 i。交换最多 n-1 次，
+   但比较次数固定 n(n-1)/2，跟数据有没有序无关。 */
+void selectionSort(int a[], int n) {
+    int cmp = 0, swp = 0;
+    for (int i = 0; i < n - 1; ++i) {
+        int m = i;
+        for (int j = i + 1; j < n; ++j) { ++cmp; if (a[j] < a[m]) m = j; }
+        if (m != i) { int t = a[i]; a[i] = a[m]; a[m] = t; ++swp; }
+    }
+    printf("选择排序：比较 %d 次，交换 %d 次\\n  ", cmp, swp);
+    show("", a, n);
+}
+
+/* 希尔排序：按 gap 分组做插入排序，gap 逐次减半，最后一趟 gap=1。
+   大步长先让数据「大致有序」，最后一趟的搬移就少得多。 */
+void shellSort(int a[], int n) {
+    int cmp = 0, mv = 0;
+    for (int gap = n / 2; gap > 0; gap /= 2) {
+        for (int i = gap; i < n; ++i) {
+            int x = a[i], j = i;
+            while (j >= gap) {
+                ++cmp;
+                if (a[j - gap] <= x) break;
+                a[j] = a[j - gap]; ++mv; j -= gap;   // 同组内后移 gap 位
+            }
+            a[j] = x; ++mv;
+        }
+        printf("  gap=%d：", gap); show("", a, n);
+    }
+    printf("希尔排序：比较 %d 次，移动 %d 次\\n", cmp, mv);
+}
+
+int main() {
+    const int raw[10] = {9, 5, 1, 8, 3, 7, 2, 6, 4, 0};
+    int a[10], b[10];
+    memcpy(a, raw, sizeof(raw));
+    memcpy(b, raw, sizeof(raw));
+    show("原始数据：", raw, 10);
+    selectionSort(a, 10);
+    shellSort(b, 10);
+    return 0;
+}
+`,
+  },
+  '堆排序（数组版建堆与下沉）': {
+    group: '排序',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 完全二叉树用数组存：下标 i 的孩子是 2i+1 / 2i+2，父亲是 (i-1)/2。
+   不用指针、不用 priority_queue，堆排序只要一个 siftDown。 */
+static int cmpCnt, swpCnt;
+
+void siftDown(int a[], int root, int end) {          // 维护 [root,end) 的大顶堆
+    while (2 * root + 1 < end) {
+        int child = 2 * root + 1;
+        ++cmpCnt;
+        if (child + 1 < end && a[child + 1] > a[child]) ++child;
+        ++cmpCnt;
+        if (a[root] >= a[child]) break;
+        int t = a[root]; a[root] = a[child]; a[child] = t;
+        ++swpCnt;
+        root = child;
+    }
+}
+
+void heapSort(int a[], int n) {
+    for (int i = n / 2 - 1; i >= 0; --i) siftDown(a, i, n);  // 自底向上建堆 O(n)
+    printf("建堆完成（大顶堆）：");
+    for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+    printf("\\n");
+    for (int end = n - 1; end > 0; --end) {
+        int t = a[0]; a[0] = a[end]; a[end] = t;     // 堆顶最大值换到末尾
+        ++swpCnt;
+        siftDown(a, 0, end);                          // 剩下 [0,end) 重新成堆
+    }
+}
+
+int main() {
+    int a[12] = {4, 10, 3, 5, 1, 8, 7, 2, 9, 6, 0, 11};
+    printf("原始数据：");
+    for (int i = 0; i < 12; ++i) printf("%d ", a[i]);
+    printf("\\n");
+    heapSort(a, 12);
+    printf("排序结果：");
+    for (int i = 0; i < 12; ++i) printf("%d ", a[i]);
+    printf("\\n比较 %d 次，交换 %d 次；时间 O(n log n)，额外空间 O(1)\\n", cmpCnt, swpCnt);
+    return 0;
+}
+`,
+  },
+  '计数排序 + 桶排序': {
+    group: '排序',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 非比较排序：值域小就数频次（计数排序），值域大但分布均匀就分桶
+   （桶内再用插入排序）。两者都靠数组下标，复杂度能压到 O(n+k)。 */
+void countingSort(const int a[], int out[], int n, int range) {
+    int cnt[101];
+    memset(cnt, 0, sizeof(cnt));
+    for (int i = 0; i < n; ++i) ++cnt[a[i]];
+    for (int v = 1; v <= range; ++v) cnt[v] += cnt[v - 1];   // 前缀和 = 该值的结束位置
+    for (int i = n - 1; i >= 0; --i) out[--cnt[a[i]]] = a[i]; // 倒着放才稳定
+}
+
+void insertSort(int b[], int n) {
+    for (int i = 1; i < n; ++i) {
+        int x = b[i], j = i - 1;
+        while (j >= 0 && b[j] > x) { b[j + 1] = b[j]; --j; }
+        b[j + 1] = x;
+    }
+}
+
+int main() {
+    const int a[12] = {7, 3, 9, 1, 7, 5, 2, 8, 3, 6, 4, 0};
+    int out[12];
+    countingSort(a, out, 12, 9);
+    printf("计数排序：");
+    for (int i = 0; i < 12; ++i) printf("%d ", out[i]);
+    printf("\\n（值域 0..9，重复值 3、7 的相对次序保持不变）\\n\\n");
+
+    const int raw[12] = {29, 5, 71, 18, 44, 93, 36, 60, 12, 87, 51, 66};
+    const int B = 5, W = 20;                  // 5 个桶：[0,20) [20,40) ...
+    int bucket[5][12], len[5];
+    for (int b = 0; b < B; ++b) len[b] = 0;
+    for (int i = 0; i < 12; ++i) {
+        int b = raw[i] / W;
+        bucket[b][len[b]++] = raw[i];
+    }
+    printf("桶分布（每桶内先插入排序）：\\n");
+    for (int b = 0; b < B; ++b) {
+        insertSort(bucket[b], len[b]);
+        printf("  桶 %d：", b);
+        for (int i = 0; i < len[b]; ++i) printf("%d ", bucket[b][i]);
+        printf("\\n");
+    }
+    printf("桶排序结果：");
+    for (int b = 0; b < B; ++b)
+        for (int i = 0; i < len[b]; ++i) printf("%d ", bucket[b][i]);
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '基数排序（按位分桶）': {
+    group: '排序',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* LSD 基数排序：从个位到最高位，每一位都做一次「稳定计数排序」。
+   10 个桶用 cnt[10] 的前缀和表示结束位置，tmp[] 暂存一趟结果。 */
+void radixSort(int a[], int n) {
+    int tmp[20], cnt[10];
+    int maxv = a[0];
+    for (int i = 1; i < n; ++i) if (a[i] > maxv) maxv = a[i];
+    for (int exp = 1; exp <= maxv; exp *= 10) {
+        memset(cnt, 0, sizeof(cnt));
+        for (int i = 0; i < n; ++i) ++cnt[(a[i] / exp) % 10];
+        for (int d = 1; d < 10; ++d) cnt[d] += cnt[d - 1];
+        for (int i = n - 1; i >= 0; --i)     // 倒序保证稳定
+            tmp[--cnt[(a[i] / exp) % 10]] = a[i];
+        memcpy(a, tmp, n * sizeof(int));
+        printf("  按 10^%d 位分桶后：", exp == 1 ? 0 : (exp == 10 ? 1 : 2));
+        for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+        printf("\\n");
+    }
+}
+
+int main() {
+    int a[12] = {170, 45, 75, 90, 2, 802, 24, 66, 8, 301, 123, 55};
+    printf("原始数据：");
+    for (int i = 0; i < 12; ++i) printf("%d ", a[i]);
+    printf("\\n");
+    radixSort(a, 12);
+    printf("排序结果：");
+    for (int i = 0; i < 12; ++i) printf("%d ", a[i]);
+    printf("\\n复杂度 O(d(n+10))，d 是最大位数；每一趟都必须稳定。\\n");
+    return 0;
+}
+`,
+  },
+  '双指针：去重 / 两数之和 / 反转': {
+    group: '数组技巧',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 有序数组上的三个双指针套路，全程只用下标，额外空间 O(1)。 */
+int dedup(int a[], int n) {                  // 慢指针写、快指针读
+    if (n == 0) return 0;
+    int w = 1;
+    for (int r = 1; r < n; ++r)
+        if (a[r] != a[w - 1]) a[w++] = a[r];
+    return w;
+}
+
+bool twoSum(const int a[], int n, int target, int& i, int& j) {
+    int l = 0, r = n - 1;                    // 有序：和太大就右指针左移
+    while (l < r) {
+        int s = a[l] + a[r];
+        if (s == target) { i = l; j = r; return true; }
+        if (s < target) ++l; else --r;
+    }
+    return false;
+}
+
+void reverseArr(int a[], int n) {
+    for (int l = 0, r = n - 1; l < r; ++l, --r) {
+        int t = a[l]; a[l] = a[r]; a[r] = t;
+    }
+}
+
+int main() {
+    int a[12] = {1, 1, 2, 2, 2, 3, 4, 4, 5, 6, 6, 7};
+    int k = dedup(a, 12);
+    printf("去重后长度 %d：", k);
+    for (int i = 0; i < k; ++i) printf("%d ", a[i]);
+    printf("\\n");
+
+    int i = -1, j = -1;
+    if (twoSum(a, k, 9, i, j))
+        printf("两数之和 9 -> 下标 %d 和 %d（%d + %d）\\n", i, j, a[i], a[j]);
+    else
+        printf("没找到和为 9 的一对\\n");
+
+    reverseArr(a, k);
+    printf("反转后：");
+    for (int t = 0; t < k; ++t) printf("%d ", a[t]);
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '前缀和与差分数组': {
+    group: '数组技巧',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+int main() {
+    const int n = 8;
+    int a[8] = {2, 5, 1, 7, 3, 6, 4, 8};
+
+    /* 前缀和：pre[i] = a[0..i-1] 之和，pre[0]=0，区间和相减即可。 */
+    int pre[9];
+    pre[0] = 0;
+    for (int i = 0; i < n; ++i) pre[i + 1] = pre[i] + a[i];
+    printf("前缀和：");
+    for (int i = 0; i <= n; ++i) printf("%d ", pre[i]);
+    printf("\\n  a[2..5] = pre[6]-pre[2] = %d\\n", pre[6] - pre[2]);
+    printf("  a[0..7] = %d\\n\\n", pre[8] - pre[0]);
+
+    /* 差分：d[i] = a[i]-a[i-1]，区间 [l,r] 加 v 只改 d[l] 和 d[r+1] 两处，
+       最后前缀和还原。m 次区间加从 O(mn) 降到 O(m+n)。 */
+    int d[10];
+    memset(d, 0, sizeof(d));
+    d[0] = a[0];
+    for (int i = 1; i < n; ++i) d[i] = a[i] - a[i - 1];
+    int ops[3][3] = {{1, 4, 10}, {3, 6, 5}, {0, 2, -2}};
+    for (int k = 0; k < 3; ++k) {
+        int l = ops[k][0], r = ops[k][1], v = ops[k][2];
+        d[l] += v; d[r + 1] -= v;
+        printf("  区间 [%d,%d] 加 %d\\n", l, r, v);
+    }
+    int cur = 0;
+    printf("还原后的数组：");
+    for (int i = 0; i < n; ++i) { cur += d[i]; printf("%d ", cur); }
+    printf("\\n逐项核对：");
+    for (int i = 0; i < n; ++i) {
+        int v = a[i];
+        for (int k = 0; k < 3; ++k)
+            if (i >= ops[k][0] && i <= ops[k][1]) v += ops[k][2];
+        printf("%d ", v);
+    }
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '滑动窗口：定长最大和与最短子数组': {
+    group: '数组技巧',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 滑动窗口：右端点一直往前走，左端点只在条件被破坏时跟着走，
+   每个元素最多进一次、出一次，所以是 O(n)，不用枚举所有子数组。 */
+int main() {
+    const int n = 10;
+    int a[10] = {2, 3, 5, 1, 6, 4, 8, 2, 7, 3};
+
+    /* 定长 k=3 的最大和：先算头一个窗口，之后「加右端、减左端」 */
+    const int k = 3;
+    int sum = 0;
+    for (int i = 0; i < k; ++i) sum += a[i];
+    int best = sum, bestL = 0;
+    printf("长度 %d 的窗口：", k);
+    for (int r = k; r < n; ++r) {
+        printf("[%d..%d]=%d ", r - k, r - 1, sum);
+        sum += a[r] - a[r - k];
+        if (sum > best) { best = sum; bestL = r - k + 1; }
+    }
+    printf("[%d..%d]=%d\\n", n - k, n - 1, sum);
+    if (sum > best) { best = sum; bestL = n - k; }
+    printf("最大窗口和 = %d（起点下标 %d）\\n\\n", best, bestL);
+
+    /* 变长：和 >= target 的最短子数组，右端扩张、左端收缩 */
+    const int target = 15;
+    int l = 0, cur = 0, minLen = n + 1, ansL = -1;
+    for (int r = 0; r < n; ++r) {
+        cur += a[r];
+        while (cur >= target) {
+            if (r - l + 1 < minLen) { minLen = r - l + 1; ansL = l; }
+            cur -= a[l++];
+        }
+    }
+    printf("和 >= %d 的最短子数组：", target);
+    if (ansL < 0) printf("不存在\\n");
+    else {
+        printf("长度 %d，起点 %d，元素 ", minLen, ansL);
+        for (int i = ansL; i < ansL + minLen; ++i) printf("%d ", a[i]);
+        printf("\\n");
+    }
+    return 0;
+}
+`,
+  },
+  '静态链表（游标数组实现）': {
+    group: '数组技巧',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 不用指针、不用 new：节点存在定长数组里，next[] 存的是「下一个节点的下标」，
+   -1 表示空。这就是很多教材里说的「游标链表」，也是早期 FORTRAN/BASIC 的做法。 */
+struct StaticList {
+    int val[32];
+    int next[32];
+    int freeHead;                 // 空闲节点链头
+    int used;
+    StaticList() : freeHead(0), used(0) {
+        for (int i = 0; i < 31; ++i) next[i] = i + 1;
+        next[31] = -1;
+    }
+    int alloc(int v) {
+        if (freeHead == -1) return -1;   // 满了
+        int p = freeHead;
+        freeHead = next[p];
+        val[p] = v; next[p] = -1; ++used;
+        return p;
+    }
+    void release(int p) { next[p] = freeHead; freeHead = p; --used; }
+};
+
+void printList(StaticList& L, int head) {
+    for (int p = head; p != -1; p = L.next[p]) printf("%d -> ", L.val[p]);
+    printf("NULL\\n");
+}
+
+int main() {
+    StaticList L;
+    int head = -1, tail = -1;
+    for (int i = 0; i < 5; ++i) {       // 尾插建表
+        int p = L.alloc(i * 10 + 1);
+        if (head == -1) head = p; else L.next[tail] = p;
+        tail = p;
+    }
+    printf("建好的链表："); printList(L, head);
+    printf("节点都是数组下标，第一个节点下标 = %d，已用 %d 个\\n", head, L.used);
+
+    /* 在值为 21 的节点后插入 99 */
+    int p = L.alloc(99);
+    for (int q = head; q != -1; q = L.next[q])
+        if (L.val[q] == 21) { L.next[p] = L.next[q]; L.next[q] = p; break; }
+    printf("21 后面插入 99："); printList(L, head);
+
+    /* 删除值为 11 的节点，并把它归还空闲链 */
+    int prev = -1;
+    for (int q = head; q != -1; prev = q, q = L.next[q])
+        if (L.val[q] == 11) {
+            if (prev == -1) head = L.next[q]; else L.next[prev] = L.next[q];
+            L.release(q);
+            break;
+        }
+    printf("删除 11 之后："); printList(L, head);
+    printf("已用节点 %d 个（删除的下标被回收复用）\\n", L.used);
+    return 0;
+}
+`,
+  },
+  '二维数组：杨辉三角与螺旋遍历': {
+    group: '数组技巧',
+    stdin: '',
+    code: `#include <cstdio>
+
+int main() {
+    /* 杨辉三角：每行首尾为 1，中间 = 上一行左肩 + 右肩。 */
+    const int N = 7;
+    int tri[7][7] = {};
+    for (int i = 0; i < N; ++i) {
+        tri[i][0] = tri[i][i] = 1;
+        for (int j = 1; j < i; ++j) tri[i][j] = tri[i - 1][j - 1] + tri[i - 1][j];
+    }
+    printf("杨辉三角（第 n 行就是二项式系数）：\\n");
+    for (int i = 0; i < N; ++i) {
+        for (int s = 0; s < N - i; ++s) printf(" ");
+        for (int j = 0; j <= i; ++j) printf("%3d ", tri[i][j]);
+        printf("\\n");
+    }
+    printf("第 6 行之和 = %d = 2^6 = 64\\n\\n",
+           tri[6][0] + tri[6][1] + tri[6][2] + tri[6][3] +
+           tri[6][4] + tri[6][5] + tri[6][6]);
+
+    /* 螺旋遍历：四个边界 top/bottom/left/right 往里缩，别重复走角上的格子。 */
+    const int R = 4, C = 5;
+    int m[4][5] = {{1, 2, 3, 4, 5},
+                   {6, 7, 8, 9, 10},
+                   {11, 12, 13, 14, 15},
+                   {16, 17, 18, 19, 20}};
+    int top = 0, bottom = R - 1, left = 0, right = C - 1;
+    printf("4x5 矩阵螺旋顺序：");
+    while (top <= bottom && left <= right) {
+        for (int c = left; c <= right; ++c) printf("%d ", m[top][c]);
+        ++top;
+        for (int r = top; r <= bottom; ++r) printf("%d ", m[r][right]);
+        --right;
+        if (top <= bottom) {
+            for (int c = right; c >= left; --c) printf("%d ", m[bottom][c]);
+            --bottom;
+        }
+        if (left <= right) {
+            for (int r = bottom; r >= top; --r) printf("%d ", m[r][left]);
+            ++left;
+        }
+    }
+    printf("\\n一共 %d 个数，正好不重不漏\\n", R * C);
+    return 0;
+}
+`,
+  },
+  '单调栈：下一个更大元素与最大矩形': {
+    group: '栈与队列',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 单调栈：栈里存下标，对应值保持单调。新元素把「比自己小/大」的栈顶
+   全部弹出时，就正好找到了那些元素的第一个更大/更小值 —— 每个下标
+   只进出栈一次，整体 O(n)。 */
+int main() {
+    const int n = 8;
+    int a[8] = {4, 7, 3, 5, 2, 9, 6, 1};
+    int st[16], nge[8];                   // nge[i] = 右边第一个更大的值
+
+    int top = 0;
+    for (int i = 0; i < n; ++i) nge[i] = -1;
+    for (int i = 0; i < n; ++i) {
+        while (top > 0 && a[st[top - 1]] < a[i]) nge[st[--top]] = a[i];
+        st[top++] = i;
+    }
+    printf("数组：");
+    for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+    printf("\\n下一个更大元素：");
+    for (int i = 0; i < n; ++i) printf("%d ", nge[i]);
+    printf("  （-1 表示右边没有更大的）\\n\\n");
+
+    /* 柱状图最大矩形：单调递增栈，遇到矮柱子就弹栈，
+       以弹出柱子的高度为矩形高、宽度 = 当前下标 - 新栈顶 - 1。 */
+    int h[7] = {2, 1, 5, 6, 2, 3, 0};    // 末尾 0 是哨兵，逼着最后全部弹栈
+    long long best = 0; int bestL = 0, bestW = 0, bestH = 0;
+    top = 0;
+    for (int i = 0; i < 7; ++i) {
+        while (top > 0 && h[st[top - 1]] > h[i]) {
+            int height = h[st[--top]];
+            int l = top > 0 ? st[top - 1] + 1 : 0;
+            int width = i - l;
+            long long area = (long long)height * width;
+            if (area > best) { best = area; bestL = l; bestW = width; bestH = height; }
+        }
+        st[top++] = i;
+    }
+    printf("柱状图：");
+    for (int i = 0; i < 6; ++i) printf("%d ", h[i]);
+    printf("\\n最大矩形面积 = %lld（高 %d x 宽 %d，从下标 %d 开始）\\n",
+           best, bestH, bestW, bestL);
+    return 0;
+}
+`,
+  },
+  '单调队列：滑动窗口最大值': {
+    group: '栈与队列',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 队头永远是当前窗口最大值的下标：入队前把队尾所有「不超过自己」的
+   下标弹掉（它们既更旧又更小，永远不可能再当最大值），再把越界的
+   队头弹掉。每个下标最多进出一次，O(n)，比每窗口扫一遍 O(nk) 快。 */
+int main() {
+    const int n = 10, k = 3;
+    int a[10] = {4, 2, 8, 5, 1, 9, 3, 7, 6, 0};
+    int q[16], head = 0, tail = 0;         // q[head..tail) 存下标
+
+    printf("数组：");
+    for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+    printf("\\n窗口大小 k=%d，最大值依次为：", k);
+    for (int i = 0; i < n; ++i) {
+        while (head < tail && a[q[tail - 1]] <= a[i]) --tail;
+        q[tail++] = i;
+        while (head < tail && q[head] <= i - k) ++head;  // 队头滑出窗口
+        if (i >= k - 1) printf("%d ", a[q[head]]);
+    }
+    printf("\\n");
+
+    /* 朴素做法对照：每窗口扫 k 个数，结果必须一致。 */
+    printf("朴素 O(nk) 对照：");
+    for (int i = k - 1; i < n; ++i) {
+        int mx = a[i - k + 1];
+        for (int j = i - k + 2; j <= i; ++j) if (a[j] > mx) mx = a[j];
+        printf("%d ", mx);
+    }
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '数组栈：中缀转后缀并求值': {
+    group: '栈与队列',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+#include <cctype>
+
+/* 两个数组当栈：op[] 存运算符，val[] 存操作数，不用 stack<>。
+   shunting-yard：数字直接输出；运算符按优先级把栈顶弹到输出，
+   直到遇到更低优先级或左括号；右括号弹到左括号为止。 */
+int prec(char c) {
+    if (c == '+' || c == '-') return 1;
+    if (c == '*' || c == '/') return 2;
+    return 0;
+}
+
+int main() {
+    const char* expr = "12 + 3 * (8 - 6) / 2";
+    char post[256]; int pn = 0;
+    char op[128]; int top = 0;
+
+    for (int i = 0; expr[i]; ++i) {
+        char c = expr[i];
+        if (c == ' ') continue;
+        if (isdigit((unsigned char)c)) {           // 多位整数整体读出
+            while (isdigit((unsigned char)expr[i])) post[pn++] = expr[i++];
+            post[pn++] = ' ';
+            --i;
+        } else if (c == '(') {
+            op[top++] = c;
+        } else if (c == ')') {
+            while (top > 0 && op[top - 1] != '(') post[pn++] = op[--top], post[pn++] = ' ';
+            if (top > 0) --top;                    // 丢掉左括号
+        } else {
+            while (top > 0 && op[top - 1] != '(' && prec(op[top - 1]) >= prec(c))
+                { post[pn++] = op[--top]; post[pn++] = ' '; }
+            op[top++] = c;
+        }
+    }
+    while (top > 0) { post[pn++] = op[--top]; post[pn++] = ' '; }
+    post[pn] = 0;
+    printf("中缀：%s\\n后缀：%s\\n", expr, post);
+
+    /* 后缀求值：数字压 val[]，运算符弹两个再压回结果。 */
+    int val[128], vn = 0;
+    for (int i = 0; i < pn; ++i) {
+        char c = post[i];
+        if (c == ' ') continue;
+        if (isdigit((unsigned char)c)) {
+            int x = 0;
+            while (isdigit((unsigned char)post[i])) x = x * 10 + (post[i++] - '0');
+            val[vn++] = x;
+            --i;
+        } else {
+            int b = val[--vn], a = val[--vn];
+            int r = c == '+' ? a + b : c == '-' ? a - b : c == '*' ? a * b : a / b;
+            val[vn++] = r;
+        }
+    }
+    printf("求值结果 = %d（12 + 3*2/2 = 15）\\n", val[0]);
+    return 0;
+}
+`,
+  },
+  '哈夫曼树与编码（数组建树）': {
+    group: '树',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 节点全放定长数组，用下标当「指针」：每次挑两个 parent==0 的最小权节点，
+   合成一个新节点放进数组尾部。n 个叶子最终有 2n-1 个节点，不用 priority_queue。 */
+struct Node { int w, parent, lch, rch; };
+
+int main() {
+    const int n = 6;
+    const char ch[6] = {'A', 'B', 'C', 'D', 'E', 'F'};
+    const int freq[6] = {45, 13, 12, 16, 9, 5};
+    Node h[12];
+    for (int i = 0; i < 12; ++i) { h[i].w = 0; h[i].parent = 0; h[i].lch = h[i].rch = -1; }
+    for (int i = 0; i < n; ++i) h[i].w = freq[i];
+
+    for (int k = n; k < 2 * n - 1; ++k) {
+        int m1 = -1, m2 = -1;
+        for (int i = 0; i < k; ++i) {
+            if (h[i].parent != 0) continue;              // 已合并过的不再候选
+            if (m1 < 0 || h[i].w < h[m1].w) { m2 = m1; m1 = i; }
+            else if (m2 < 0 || h[i].w < h[m2].w) m2 = i;
+        }
+        h[k].w = h[m1].w + h[m2].w;
+        h[k].lch = m1; h[k].rch = m2;
+        h[m1].parent = h[m2].parent = k;
+        printf("  合并 %d + %d = %d（新节点下标 %d）\\n", h[m1].w, h[m2].w, h[k].w, k);
+    }
+    int root = 2 * n - 2;
+    printf("根节点下标 %d，总权值 WPL 下界 = %d\\n\\n", root, h[root].w);
+
+    long long wpl = 0;
+    printf("哈夫曼编码（左 0 右 1，从叶子往根倒推）：\\n");
+    for (int i = 0; i < n; ++i) {
+        char code[16]; int len = 0;
+        for (int p = i; h[p].parent != 0; p = h[p].parent) {
+            int par = h[p].parent;
+            code[len++] = (h[par].lch == p) ? '0' : '1';   // 先按「叶子到根」记
+        }
+        code[len] = 0;
+        for (int l = 0; l < len / 2; ++l) {                 // 翻过来才是「根到叶子」
+            char t = code[l]; code[l] = code[len - 1 - l]; code[len - 1 - l] = t;
+        }
+        printf("  %c(%2d) : %-8s 长度 %d\\n", ch[i], freq[i], code, len);
+        wpl += (long long)freq[i] * len;
+    }
+    printf("带权路径长度 WPL = %lld\\n", wpl);
+    return 0;
+}
+`,
+  },
+  '数组邻接表（前向星）与迭代遍历': {
+    group: '图',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 不用 vector<vector<int>>：三条定长数组就是邻接表。
+   head[u] 是 u 的第一条边下标，to[e]/nxt[e] 是终点和下一条边，-1 结尾。
+   加边用头插法，这也是竞赛里俗称的「前向星」。 */
+int main() {
+    const int N = 7;
+    int head[7], to[20], nxt[20], ecnt = 0;
+    for (int i = 0; i < N; ++i) head[i] = -1;
+
+    int edges[][2] = {{0,1},{0,2},{1,3},{1,4},{2,4},{2,5},{3,6},{4,6},{5,6}};
+    const int m = 9;
+    for (int i = 0; i < m; ++i) {         // 无向图存两个方向
+        int u = edges[i][0], v = edges[i][1];
+        for (int k = 0; k < 2; ++k) {
+            to[ecnt] = (k == 0 ? v : u);
+            nxt[ecnt] = head[k == 0 ? u : v];
+            head[k == 0 ? u : v] = ecnt++;
+        }
+    }
+    printf("前向星（head / to / nxt 三条数组）：\\n");
+    for (int u = 0; u < N; ++u) {
+        printf("  %d:", u);
+        for (int e = head[u]; e != -1; e = nxt[e]) printf(" %d", to[e]);
+        printf("\\n");
+    }
+
+    /* 迭代 DFS：数组当栈。注意入栈即标记，否则会重复入栈。 */
+    int vis[7]; memset(vis, 0, sizeof(vis));
+    int st[32], top = 0;
+    st[top++] = 0; vis[0] = 1;
+    printf("\\n迭代 DFS：");
+    while (top > 0) {
+        int u = st[--top];
+        printf("%d ", u);
+        for (int e = head[u]; e != -1; e = nxt[e]) {
+            int v = to[e];
+            if (!vis[v]) { vis[v] = 1; st[top++] = v; }
+        }
+    }
+
+    /* BFS：数组当循环队列（head/tail 下标，不取模也够用）。 */
+    memset(vis, 0, sizeof(vis));
+    int q[32], qh = 0, qt = 0;
+    q[qt++] = 0; vis[0] = 1;
+    printf("\\n迭代 BFS：");
+    while (qh < qt) {
+        int u = q[qh++];
+        printf("%d ", u);
+        for (int e = head[u]; e != -1; e = nxt[e]) {
+            int v = to[e];
+            if (!vis[v]) { vis[v] = 1; q[qt++] = v; }
+        }
+    }
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '邻接矩阵 + Floyd 全源最短路': {
+    group: '图',
+    stdin: '',
+    code: `#include <cstdio>
+
+int main() {
+    const int N = 5, INF = 1000000;
+    int d[5][5];
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j) d[i][j] = (i == j ? 0 : INF);
+    int e[][3] = {{0,1,4},{0,2,1},{2,1,2},{1,3,1},{2,3,5},{3,4,3},{0,3,100}};
+    for (int k = 0; k < 7; ++k) d[e[k][0]][e[k][1]] = e[k][2];
+
+    /* Floyd：枚举中转点 k，d[i][j] = min(d[i][j], d[i][k] + d[k][j])。
+       k 必须放在最外层，这样每轮 d[i][k]、d[k][j] 都已允许 {0..k-1} 作中转。 */
+    int relax = 0;
+    for (int k = 0; k < N; ++k)
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                if (d[i][k] + d[k][j] < d[i][j]) {
+                    d[i][j] = d[i][k] + d[k][j];
+                    ++relax;
+                }
+    printf("Floyd 松弛 %d 次，最终距离矩阵（INF 记 -1）：\\n", relax);
+    printf("      ");
+    for (int j = 0; j < N; ++j) printf("%4d", j);
+    printf("\\n");
+    for (int i = 0; i < N; ++i) {
+        printf("  %d:  ", i);
+        for (int j = 0; j < N; ++j)
+            printf("%4d", d[i][j] >= INF ? -1 : d[i][j]);
+        printf("\\n");
+    }
+    printf("\\n0 -> 3 = %d（直达边是 100，绕 0->2->1->3 只要 4）\\n", d[0][3]);
+    printf("0 -> 4 = %d\\n", d[0][4]);
+    return 0;
+}
+`,
+  },
+  '拓扑排序（Kahn 数组队列）': {
+    group: '图',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* Kahn 算法：入度为 0 的点入队，出队时把它的邻接点入度减一，
+   新变成 0 的接着入队。若出队数 < 顶点数，说明图里有环。 */
+int main() {
+    const int N = 7;
+    int edges[][2] = {{0,1},{0,2},{1,3},{2,3},{3,4},{2,5},{5,6},{4,6}};
+    const int M = 8;
+    int head[7], to[8], nxt[8], indeg[7];
+    for (int i = 0; i < N; ++i) { head[i] = -1; indeg[i] = 0; }
+    for (int i = 0; i < M; ++i) {
+        int u = edges[i][0], v = edges[i][1];
+        to[i] = v; nxt[i] = head[u]; head[u] = i;
+        ++indeg[v];
+    }
+    printf("各点入度：");
+    for (int i = 0; i < N; ++i) printf("%d ", indeg[i]);
+    printf("\\n");
+
+    int q[16], qh = 0, qt = 0, order[16], cnt = 0;
+    for (int i = 0; i < N; ++i) if (indeg[i] == 0) q[qt++] = i;
+    while (qh < qt) {
+        int u = q[qh++];
+        order[cnt++] = u;
+        for (int e = head[u]; e != -1; e = nxt[e])
+            if (--indeg[to[e]] == 0) q[qt++] = to[e];
+    }
+    printf("拓扑序：");
+    for (int i = 0; i < cnt; ++i) printf("%d ", order[i]);
+    printf("\\n出队 %d 个点，%s\\n", cnt, cnt == N ? "无环" : "有环（剩下的点构成环）");
+
+    /* 再加一条 6->0 的边造环，看算法怎么停下来 */
+    int indeg2[7] = {1, 1, 1, 2, 1, 1, 2};   // 原入度 + 6->0 让 0 也 +1
+    qh = qt = cnt = 0;
+    for (int i = 0; i < N; ++i) if (indeg2[i] == 0) q[qt++] = i;
+    while (qh < qt) {
+        int u = q[qh++];
+        order[cnt++] = u;
+        for (int e = head[u]; e != -1; e = nxt[e])
+            if (--indeg2[to[e]] == 0) q[qt++] = to[e];
+        if (u == 6) { if (--indeg2[0] == 0) q[qt++] = 0; }
+    }
+    printf("加一条 6->0 后只排出 %d 个点 -> 检测到环\\n", cnt);
+    return 0;
+}
+`,
+  },
+  '最小生成树：Prim + Kruskal': {
+    group: '图',
+    stdin: '',
+    code: `#include <cstdio>
+
+struct Edge { int u, v, w; };
+
+/* 并查集也是数组：fa[i] 存父节点下标，按 size 合并防退化。 */
+int fa[8];
+int find(int x) { while (fa[x] != x) { fa[x] = fa[fa[x]]; x = fa[x]; } return x; }
+bool unite(int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) return false;
+    fa[b] = a;
+    return true;
+}
+
+int main() {
+    const int N = 6, M = 9, INF = 1000000;
+    Edge e[9] = {{0,1,4},{0,2,2},{1,2,1},{1,3,5},{2,3,8},
+                 {2,4,10},{3,4,2},{3,5,6},{4,5,3}};
+
+    /* Prim：从 0 号点长出一棵树，lowcost[v] 记当前树到 v 的最便宜边。 */
+    int g[6][6];
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j) g[i][j] = INF;
+    for (int k = 0; k < M; ++k) { g[e[k].u][e[k].v] = e[k].w; g[e[k].v][e[k].u] = e[k].w; }
+    int low[6], in[6]; long long primCost = 0;
+    for (int i = 0; i < N; ++i) { low[i] = g[0][i]; in[i] = 0; }
+    in[0] = 1;
+    printf("Prim 依次选边：\\n");
+    for (int k = 1; k < N; ++k) {
+        int v = -1;
+        for (int i = 0; i < N; ++i) if (!in[i] && (v < 0 || low[i] < low[v])) v = i;
+        printf("  0..%d 树接到 %d，边权 %d\\n", k - 1, v, low[v]);
+        primCost += low[v]; in[v] = 1;
+        for (int i = 0; i < N; ++i) if (!in[i] && g[v][i] < low[i]) low[i] = g[v][i];
+    }
+    printf("Prim 总权值 = %lld\\n\\n", primCost);
+
+    /* Kruskal：边按权排序（这里数据少，手写选择排序），再用并查集跳过成环的边。 */
+    Edge sorted[9];
+    for (int i = 0; i < M; ++i) sorted[i] = e[i];
+    for (int i = 0; i < M - 1; ++i) {
+        int m = i;
+        for (int j = i + 1; j < M; ++j) if (sorted[j].w < sorted[m].w) m = j;
+        Edge t = sorted[i]; sorted[i] = sorted[m]; sorted[m] = t;
+    }
+    for (int i = 0; i < N; ++i) fa[i] = i;
+    long long kruskalCost = 0; int used = 0;
+    printf("Kruskal 依次选边：\\n");
+    for (int k = 0; k < M && used < N - 1; ++k) {
+        if (unite(sorted[k].u, sorted[k].v)) {
+            printf("  %d-%d(%d)\\n", sorted[k].u, sorted[k].v, sorted[k].w);
+            kruskalCost += sorted[k].w; ++used;
+        }
+    }
+    printf("Kruskal 总权值 = %lld（应与 Prim 相等）\\n", kruskalCost);
+    return 0;
+}
+`,
+  },
+  '散列表：开放定址线性探测': {
+    group: '查找与字符串',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 冲突不挂链，直接在表内往后找空位：h = (key + i) % CAP 线性探测，
+   或 (key + i*i) % CAP 平方探测。删除要做墓碑标记，否则会截断探测链。
+   状态：0 空 / 1 占用 / 2 已删除（墓碑）。 */
+const int CAP = 11;
+int keyTab[11], valTab[11], state[11];
+
+int insertLinear(int k, int v) {
+    int probes = 0;
+    for (int i = 0; i < CAP; ++i) {
+        int p = (k + i) % CAP;
+        ++probes;
+        if (state[p] == 1) { if (keyTab[p] == k) { valTab[p] = v; return probes; } continue; }
+        keyTab[p] = k; valTab[p] = v; state[p] = 1;
+        return probes;
+    }
+    return -1;                            // 表满
+}
+
+int findKey(int k, int& outV) {
+    for (int i = 0; i < CAP; ++i) {
+        int p = (k + i) % CAP;
+        if (state[p] == 0) return -1;     // 遇到真空位就可以停
+        if (state[p] == 1 && keyTab[p] == k) { outV = valTab[p]; return i + 1; }
+    }
+    return -1;
+}
+
+int main() {
+    memset(state, 0, sizeof(state));
+    int keys[7] = {12, 23, 34, 45, 56, 67, 78};   // 都 mod 11 容易撞车
+    printf("插入（线性探测，CAP=%d）：\\n", CAP);
+    for (int i = 0; i < 7; ++i) {
+        int p = insertLinear(keys[i], keys[i] * 10);
+        printf("  key=%2d h=%2d 探测 %d 次 -> 实际下标 %d\\n",
+               keys[i], keys[i] % CAP, p, (keys[i] % CAP + p - 1) % CAP);
+    }
+    printf("\\n表内容：\\n");
+    for (int i = 0; i < CAP; ++i)
+        printf("  [%2d] %s\\n", i, state[i] == 1 ? "占用" : state[i] == 2 ? "墓碑" : "空");
+    printf("\\n查找：\\n");
+    for (int i = 0; i < 3; ++i) {
+        int k = (i == 0 ? 34 : i == 1 ? 67 : 99), v = -1;
+        int n = findKey(k, v);
+        printf("  key=%d -> %s（探测 %d 次）\\n", k,
+               n < 0 ? "查无此键" : "找到", n < 0 ? CAP : n);
+    }
+    return 0;
+}
+`,
+  },
+  'Trie 字典树（二维数组）': {
+    group: '查找与字符串',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 每个节点的 26 个孩子就是 nxt[节点号][字母]，-1 表示没有这条边。
+   整棵树是一块静态二维数组，插查都是 O(串长)，和单词数量无关。 */
+int nxt[64][26];
+int isEnd[64], passCnt[64], nodes;
+
+void initTrie() {
+    memset(nxt, -1, sizeof(nxt));
+    memset(isEnd, 0, sizeof(isEnd));
+    memset(passCnt, 0, sizeof(passCnt));
+    nodes = 1;                         // 0 号是根
+}
+
+void insertWord(const char* s) {
+    int p = 0;
+    for (int i = 0; s[i]; ++i) {
+        int c = s[i] - 'a';
+        if (nxt[p][c] == -1) nxt[p][c] = nodes++;
+        p = nxt[p][c];
+        ++passCnt[p];                 // 经过这个节点的单词数
+    }
+    isEnd[p] = 1;
+}
+
+int findWord(const char* s, int& passes) {
+    int p = 0;
+    for (int i = 0; s[i]; ++i) {
+        int c = s[i] - 'a';
+        if (nxt[p][c] == -1) return 0;
+        p = nxt[p][c];
+    }
+    passes = passCnt[p];
+    return isEnd[p];
+}
+
+int main() {
+    initTrie();
+    const char* words[6] = {"to", "tea", "ted", "ten", "in", "inn"};
+    for (int i = 0; i < 6; ++i) insertWord(words[i]);
+    printf("插入 6 个单词，共用 %d 个节点（前缀共享节点，所以远少于字母总数）\\n", nodes);
+    printf("根节点的出边：");
+    for (int c = 0; c < 26; ++c) if (nxt[0][c] != -1) printf("%c ", 'a' + c);
+    printf("\\n\\n");
+
+    const char* query[5] = {"tea", "te", "ten", "inn", "toe"};
+    for (int i = 0; i < 5; ++i) {
+        int passes = 0;
+        int whole = findWord(query[i], passes);
+        printf("  查 %-4s：%s，经过该前缀的单词 %d 个\\n", query[i],
+               whole ? "是完整单词" : (passes > 0 ? "只是前缀/不存在" : "不存在"), passes);
+    }
+    printf("\\n注意 te 不是完整单词但 te 前缀下有 3 个单词，这正是前缀统计的用法。\\n");
+    return 0;
+}
+`,
+  },
+  'Rabin-Karp 滚动哈希匹配': {
+    group: '查找与字符串',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* 把字符串看成 131 进制数，窗口右移时「减掉最高位、乘 base、加新字符」
+   就是 O(1) 的滚动哈希，不用每次重算整段。哈希相等后再逐字符核对，防碰撞。 */
+typedef unsigned long long ULL;
+const ULL BASE = 131;
+
+int main() {
+    const char* text = "abababcaabababcab";
+    const char* pat  = "ababc";
+    int n = (int)strlen(text), m = (int)strlen(pat);
+
+    ULL pw = 1;
+    for (int i = 1; i < m; ++i) pw *= BASE;      // BASE^(m-1)
+    ULL hp = 0, ht = 0;
+    for (int i = 0; i < m; ++i) { hp = hp * BASE + (unsigned char)pat[i]; ht = ht * BASE + (unsigned char)text[i]; }
+
+    printf("文本：%s\\n模式：%s（长度 %d）\\n", text, pat, m);
+    printf("RK 命中位置：");
+    int verified = 0;
+    for (int i = 0; i + m <= n; ++i) {
+        if (ht == hp) {
+            ++verified;                           // 哈希命中才逐字符核对
+            int ok = 1;
+            for (int j = 0; j < m; ++j) if (text[i + j] != pat[j]) { ok = 0; break; }
+            if (ok) printf("%d ", i);
+        }
+        if (i + m < n) ht = (ht - (unsigned char)text[i] * pw) * BASE + (unsigned char)text[i + m];
+    }
+    printf("（哈希比对 %d 次）\\n朴素匹配：", verified);
+    for (int i = 0; i + m <= n; ++i) {
+        int ok = 1;
+        for (int j = 0; j < m; ++j) if (text[i + j] != pat[j]) { ok = 0; break; }
+        if (ok) printf("%d ", i);
+    }
+    printf("\\n两种结果应当一致；平均 O(n+m)，最坏仍 O(nm)。\\n");
+    return 0;
+}
+`,
+  },
+  '01 背包（一维滚动数组）': {
+    group: '动态规划',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* dp[c] = 容量 c 下的最大价值。容量必须倒着枚举：正序会让同一件物品
+   被反复放进数组，那就变成完全背包了。 */
+int main() {
+    const int n = 5, CAP = 12;
+    int w[5] = {2, 3, 4, 5, 9};
+    int v[5] = {3, 4, 5, 8, 10};
+    const char* name[5] = {"A", "B", "C", "D", "E"};
+    int dp[13], pick[5][13];
+    memset(dp, 0, sizeof(dp));
+    memset(pick, 0, sizeof(pick));
+
+    for (int i = 0; i < n; ++i)
+        for (int c = CAP; c >= w[i]; --c) {
+            int cand = dp[c - w[i]] + v[i];
+            if (cand > dp[c]) { dp[c] = cand; pick[i][c] = 1; }
+        }
+    printf("容量 0..%d 的最优值：", CAP);
+    for (int c = 0; c <= CAP; ++c) printf("%d ", dp[c]);
+    printf("\\n最大价值 = %d\\n", dp[CAP]);
+
+    /* 倒着按 pick 表还原选了哪些物品 */
+    int c = CAP;
+    printf("选取方案（倒推）：");
+    for (int i = n - 1; i >= 0; --i) {
+        if (pick[i][c]) { printf("%s ", name[i]); c -= w[i]; }
+    }
+    printf("\\n剩余容量 %d；总重 %d，总价值 %d\\n", c, CAP - c, dp[CAP]);
+    return 0;
+}
+`,
+  },
+  '完全背包 + 零钱兑换': {
+    group: '动态规划',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+int main() {
+    const int CAP = 11;
+    int coin[3] = {1, 3, 4};
+
+    /* 完全背包：每件物品无限次，容量正着枚举，dp[c-w]+v 里已经含了本件物品。 */
+    int best[12];
+    memset(best, 0, sizeof(best));
+    for (int i = 0; i < 3; ++i)
+        for (int c = coin[i]; c <= CAP; ++c)
+            if (best[c - coin[i]] + coin[i] > best[c])
+                best[c] = best[c - coin[i]] + coin[i];
+    printf("面额 {1,3,4}，凑出 0..%d 能凑到的最大金额：\\n  ", CAP);
+    for (int c = 0; c <= CAP; ++c) printf("%d ", best[c]);
+    printf("\\n  （每个值都等于金额本身说明都能凑齐）\\n\\n");
+
+    /* 零钱兑换：求「最少几枚」，初始化成 INF，正序同样因为可无限取。 */
+    const int INF = 1000000;
+    int cnt[12], first[12];
+    for (int c = 0; c <= CAP; ++c) { cnt[c] = INF; first[c] = -1; }
+    cnt[0] = 0;
+    for (int i = 0; i < 3; ++i)
+        for (int c = coin[i]; c <= CAP; ++c)
+            if (cnt[c - coin[i]] + 1 < cnt[c]) {
+                cnt[c] = cnt[c - coin[i]] + 1;
+                first[c] = coin[i];
+            }
+    printf("凑 11 的最少硬币数 = %d，方案：", cnt[CAP]);
+    int c = CAP;
+    while (c > 0) { printf("%d ", first[c]); c -= first[c]; }
+    printf("\\ncnt 数组（最少枚数）：");
+    for (int i = 0; i <= CAP; ++i) printf("%d ", cnt[i] >= INF ? -1 : cnt[i]);
+    printf("\\n");
+    return 0;
+}
+`,
+  },
+  '最长公共子序列 LCS（二维 dp）': {
+    group: '动态规划',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* dp[i][j] = a 前 i 个与 b 前 j 个的 LCS 长度。
+   相等就 dp[i-1][j-1]+1，不等就取上、左的较大者；
+   填完表从右下角往回走即可还原一个具体的子序列。 */
+int main() {
+    const char* a = "ABCBDAB";
+    const char* b = "BDCABA";
+    int n = (int)strlen(a), m = (int)strlen(b);
+    int dp[16][16];
+    for (int i = 0; i <= n; ++i)
+        for (int j = 0; j <= m; ++j) dp[i][j] = 0;
+
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= m; ++j)
+            dp[i][j] = (a[i - 1] == b[j - 1])
+                     ? dp[i - 1][j - 1] + 1
+                     : (dp[i - 1][j] > dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1]);
+
+    printf("a = %s\\nb = %s\\nLCS 长度 = %d\\n", a, b, dp[n][m]);
+    char lcs[16]; int k = 0, i = n, j = m;
+    while (i > 0 && j > 0) {
+        if (a[i - 1] == b[j - 1]) { lcs[k++] = a[i - 1]; --i; --j; }
+        else if (dp[i - 1][j] >= dp[i][j - 1]) --i;
+        else --j;
+    }
+    for (int l = 0; l < k / 2; ++l) { char t = lcs[l]; lcs[l] = lcs[k - 1 - l]; lcs[k - 1 - l] = t; }
+    lcs[k] = 0;
+    printf("还原出的一个 LCS = %s\\n\\n", lcs);
+    printf("dp 表（行 a，列 b）：\\n    ");
+    for (int j = 0; j < m; ++j) printf("%2c", b[j]);
+    printf("\\n");
+    for (int i = 0; i <= n; ++i) {
+        printf("%2c ", i ? a[i - 1] : ' ');
+        for (int j = 0; j <= m; ++j) printf("%2d", dp[i][j]);
+        printf("\\n");
+    }
+    return 0;
+}
+`,
+  },
+  '最长上升子序列 LIS 与方案还原': {
+    group: '动态规划',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* dp[i] = 以 a[i] 结尾的 LIS 长度，pre[i] 记它在序列里的前驱下标。
+   O(n^2) 写法最容易看懂；下标链倒着走就能把一条具体方案打印出来。 */
+int main() {
+    const int n = 10;
+    int a[10] = {2, 5, 1, 7, 3, 4, 8, 6, 9, 0};
+    int dp[10], pre[10];
+    for (int i = 0; i < n; ++i) { dp[i] = 1; pre[i] = -1; }
+
+    int bestLen = 1, bestEnd = 0;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < i; ++j)
+            if (a[j] < a[i] && dp[j] + 1 > dp[i]) { dp[i] = dp[j] + 1; pre[i] = j; }
+        if (dp[i] > bestLen) { bestLen = dp[i]; bestEnd = i; }
+    }
+    printf("数组：");
+    for (int i = 0; i < n; ++i) printf("%d ", a[i]);
+    printf("\\n以各位置结尾的 LIS 长度：");
+    for (int i = 0; i < n; ++i) printf("%d ", dp[i]);
+    printf("\\nLIS 长度 = %d\\n", bestLen);
+
+    int chain[16], k = 0;
+    for (int p = bestEnd; p != -1; p = pre[p]) chain[k++] = a[p];
+    printf("还原一条 LIS：");
+    for (int t = k - 1; t >= 0; --t) printf("%d ", chain[t]);
+    printf("\\n（严格上升，pre[] 存的是前驱下标）\\n");
+    return 0;
+}
+`,
+  },
+  '编辑距离（二维 dp）': {
+    group: '动态规划',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* dp[i][j] = 把 a 前 i 个字符变成 b 前 j 个字符的最少操作数，
+   操作只有插入、删除、替换三种，每种代价 1。 */
+int min3(int x, int y, int z) {
+    int m = x < y ? x : y;
+    return m < z ? m : z;
+}
+
+int main() {
+    const char* a = "kitten";
+    const char* b = "sitting";
+    int n = (int)strlen(a), m = (int)strlen(b);
+    int dp[16][16];
+    for (int i = 0; i <= n; ++i) dp[i][0] = i;      // 全删
+    for (int j = 0; j <= m; ++j) dp[0][j] = j;      // 全插
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= m; ++j)
+            dp[i][j] = (a[i - 1] == b[j - 1])
+                     ? dp[i - 1][j - 1]
+                     : 1 + min3(dp[i - 1][j],      // 删 a[i-1]
+                                dp[i][j - 1],      // 插入 b[j-1]
+                                dp[i - 1][j - 1]); // 替换
+
+    printf("%s -> %s\\n编辑距离 = %d\\n", a, b, dp[n][m]);
+    printf("（k->s 替换、e->i 替换、末尾插 g，共 3 步）\\n\\n");
+    printf("dp 表：\\n    ");
+    for (int j = 1; j <= m; ++j) printf("%2c", b[j - 1]);
+    printf("\\n");
+    for (int i = 0; i <= n; ++i) {
+        printf("%2c ", i ? a[i - 1] : ' ');
+        for (int j = 0; j <= m; ++j) printf("%2d", dp[i][j]);
+        printf("\\n");
+    }
+    return 0;
+}
+`,
+  },
+  '全排列与组合（used 数组回溯）': {
+    group: '回溯',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 回溯 = 一层层做选择、递归、再撤销。used[] 标哪些元素已经选过，
+   path[] 是当前的前缀。排列看顺序，组合强制下标递增以免重复。 */
+void permute(int path[], int used[], int depth, int n, int& count) {
+    if (depth == n) {
+        if (count < 6) { printf("  "); for (int i = 0; i < n; ++i) printf("%d ", path[i]); printf("\\n"); }
+        ++count;
+        return;
+    }
+    for (int i = 0; i < n; ++i) {
+        if (used[i]) continue;
+        used[i] = 1; path[depth] = i + 1;
+        permute(path, used, depth + 1, n, count);
+        used[i] = 0;                     // 撤销选择，回到上一层
+    }
+}
+
+void combine(int path[], int depth, int start, int n, int k, int& count) {
+    if (depth == k) {
+        if (count < 6) { printf("  "); for (int i = 0; i < k; ++i) printf("%d ", path[i]); printf("\\n"); }
+        ++count;
+        return;
+    }
+    for (int i = start; i <= n; ++i) {   // 只往后取，组合就不重复
+        path[depth] = i;
+        combine(path, depth + 1, i + 1, n, k, count);
+    }
+}
+
+int main() {
+    int path[8], used[8] = {0};
+    int count = 0;
+    printf("{1,2,3} 的全排列（只列前 6 个）：\\n");
+    permute(path, used, 0, 3, count);
+    printf("共 %d 个 = 3!\\n\\n", count);
+
+    count = 0;
+    printf("从 {1,2,3,4,5} 取 3 个的组合（只列前 6 个）：\\n");
+    combine(path, 0, 1, 5, 3, count);
+    printf("共 %d 个 = C(5,3) = 10\\n", count);
+    return 0;
+}
+`,
+  },
+  '八皇后（列与对角线标记数组）': {
+    group: '回溯',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 逐行放皇后：col[c] 管列，diag1[row+c]、diag2[row-c+N] 管两条对角线。
+   三个布尔数组就是全部冲突检测，不用二维棋盘扫来扫去。 */
+const int N = 8;
+int col[8], diag1[16], diag2[16], pos[8];
+int solutions, shown;
+
+void dfs(int row) {
+    if (row == N) {
+        ++solutions;
+        if (shown < 3) {
+            printf("  解 %d：", solutions);
+            for (int r = 0; r < N; ++r) printf("%d ", pos[r] + 1);
+            printf("（每项是第 r 行皇后所在的列）\\n");
+            ++shown;
+        }
+        return;
+    }
+    for (int c = 0; c < N; ++c) {
+        int d1 = row + c, d2 = row - c + N;
+        if (col[c] || diag1[d1] || diag2[d2]) continue;
+        col[c] = diag1[d1] = diag2[d2] = 1;
+        pos[row] = c;
+        dfs(row + 1);
+        col[c] = diag1[d1] = diag2[d2] = 0;
+    }
+}
+
+int main() {
+    dfs(0);
+    printf("八皇后共有 %d 个解（N=%d）\\n", solutions, N);
+    printf("时间复杂度是搜索树规模，靠三个标记数组把每步冲突判断压到 O(1)\\n");
+    return 0;
+}
+`,
+  },
+  '贪心：活动选择与找零钱': {
+    group: '贪心',
+    stdin: '',
+    code: `#include <cstdio>
+
+struct Act { int s, e, id; };
+
+int main() {
+    /* 活动选择：按结束时间升序，能塞就塞。结束越早给后面留的空间越多，
+       这个「最早结束」的贪心对区间调度是最优的。 */
+    Act a[6] = {{1,3,1},{2,5,2},{3,7,3},{0,4,4},{5,9,5},{8,10,6}};
+    for (int i = 0; i < 5; ++i) {          // 手写选择排序，按结束时间
+        int m = i;
+        for (int j = i + 1; j < 6; ++j) if (a[j].e < a[m].e) m = j;
+        Act t = a[i]; a[i] = a[m]; a[m] = t;
+    }
+    printf("按结束时间排序：\\n");
+    for (int i = 0; i < 6; ++i) printf("  活动 %d: [%d,%d)\\n", a[i].id, a[i].s, a[i].e);
+    int chosen[6], k = 0, lastEnd = -1;
+    for (int i = 0; i < 6; ++i)
+        if (a[i].s >= lastEnd) { chosen[k++] = a[i].id; lastEnd = a[i].e; }
+    printf("最多能安排 %d 个活动：", k);
+    for (int i = 0; i < k; ++i) printf("%d ", chosen[i]);
+    printf("\\n\\n");
+
+    /* 找零钱：面额降序、能拿就拿。只有规范币制（如 1,5,10,25）才保证最优。 */
+    int coin[4] = {25, 10, 5, 1}, num[4] = {0};
+    int amount = 67, rest = amount;
+    for (int i = 0; i < 4; ++i) { num[i] = rest / coin[i]; rest %= coin[i]; }
+    printf("用 {25,10,5,1} 凑 %d：", amount);
+    for (int i = 0; i < 4; ++i) if (num[i]) printf("%d x %d  ", coin[i], num[i]);
+    printf("\\n共 %d 枚，剩余 %d\\n", num[0] + num[1] + num[2] + num[3], rest);
+    printf("注意换成 {1,3,4} 凑 6 时贪心会给 4+1+1，而最优是 3+3 —— 该用 DP。\\n");
+    return 0;
+}
+`,
+  },
+  '素数筛：埃氏筛与欧拉筛': {
+    group: '数学与位运算',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+int main() {
+    const int N = 50;
+    bool isCompA[51], isCompB[51];
+    memset(isCompA, 0, sizeof(isCompA));
+    memset(isCompB, 0, sizeof(isCompB));
+
+    /* 埃氏筛：每找到一个素数，把它的倍数全划掉。合数会被划多次。 */
+    int marksA = 0;
+    for (int i = 2; i <= N; ++i)
+        if (!isCompA[i])
+            for (int j = i * i; j <= N; j += i) { isCompA[j] = true; ++marksA; }
+
+    /* 欧拉筛（线性筛）：每个合数只被「最小的质因子」划一次。
+       i % prime[k] == 0 就停，保证后面的数会被更小的质因子处理掉。 */
+    int primes[32], pc = 0, marksB = 0;
+    for (int i = 2; i <= N; ++i) {
+        if (!isCompB[i]) primes[pc++] = i;
+        for (int k = 0; k < pc && i * primes[k] <= N; ++k) {
+            isCompB[i * primes[k]] = true;
+            ++marksB;
+            if (i % primes[k] == 0) break;
+        }
+    }
+    printf("50 以内的素数（%d 个）：", pc);
+    for (int i = 0; i < pc; ++i) printf("%d ", primes[i]);
+    printf("\\n\\n埃氏筛打标记 %d 次，欧拉筛打标记 %d 次\\n", marksA, marksB);
+    printf("欧拉筛每个合数只标一次，共 %d 个合数 -> 严格 O(n)\\n", N - 1 - pc);
+    return 0;
+}
+`,
+  },
+  '辗转相除 / 扩展欧几里得 / 快速幂': {
+    group: '数学与位运算',
+    stdin: '',
+    code: `#include <cstdio>
+
+int gcd(int a, int b) { return b == 0 ? a : gcd(b, a % b); }
+
+/* 扩展欧几里得：返回 gcd(a,b)，并求出 ax + by = gcd(a,b) 的一组整数解。
+   递归回代时 x = y1, y = x1 - (a/b)*y1。 */
+int exgcd(int a, int b, int& x, int& y) {
+    if (b == 0) { x = 1; y = 0; return a; }
+    int x1, y1;
+    int g = exgcd(b, a % b, x1, y1);
+    x = y1;
+    y = x1 - (a / b) * y1;
+    return g;
+}
+
+/* 快速幂：指数按二进制位拆，每步平方，O(log n) 次乘法。 */
+long long modPow(long long a, long long e, long long mod) {
+    long long r = 1 % mod;
+    while (e > 0) {
+        if (e & 1) r = r * a % mod;
+        a = a * a % mod;
+        e >>= 1;
+    }
+    return r;
+}
+
+int main() {
+    printf("gcd(1071, 462) = %d\\n", gcd(1071, 462));
+    printf("lcm(1071, 462) = %d\\n\\n", 1071 / gcd(1071, 462) * 462);
+
+    int x = 0, y = 0;
+    int g = exgcd(35, 15, x, y);
+    printf("exgcd(35, 15)：gcd = %d，35*%d + 15*%d = %d\\n", g, x, y, 35 * x + 15 * y);
+    printf("验算：%d = %d\\n\\n", 35 * x + 15 * y, g);
+
+    printf("2^10 mod 1000 = %lld\\n", modPow(2, 10, 1000));
+    printf("3^13 mod 97   = %lld\\n", modPow(3, 13, 97));
+    printf("7^0 mod 5     = %lld\\n", modPow(7, 0, 5));
+    return 0;
+}
+`,
+  },
+  '大整数阶乘（数组存十进制位）': {
+    group: '数学与位运算',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* int 装不下 30!，就用数组按十进制位存：digits[0] 是个位，
+   len 是位数。每次乘 k 时逐位做「乘 + 进位」，最后统一处理高位。 */
+int main() {
+    const int MAXD = 200;
+    int digits[MAXD];
+    for (int i = 0; i < MAXD; ++i) digits[i] = 0;
+    digits[0] = 1;
+    int len = 1;
+
+    const int N = 30;
+    for (int k = 2; k <= N; ++k) {
+        int carry = 0;
+        for (int i = 0; i < len; ++i) {
+            int t = digits[i] * k + carry;
+            digits[i] = t % 10;
+            carry = t / 10;
+        }
+        while (carry) { digits[len++] = carry % 10; carry /= 10; }
+        if (k == 5 || k == 10 || k == 20 || k == 30)
+            printf("  %2d! 已有 %d 位\\n", k, len);
+    }
+    printf("\\n%d! = ", N);
+    for (int i = len - 1; i >= 0; --i) printf("%d", digits[i]);
+    printf("\\n共 %d 位（30! = 265252859812191058636308480000000，可手算核对）\\n", len);
+    return 0;
+}
+`,
+  },
+  '树状数组（lowbit 前缀和）': {
+    group: '高级数据结构',
+    stdin: '',
+    code: `#include <cstdio>
+#include <cstring>
+
+/* bit[i] 管 [i-lowbit(i)+1, i] 这一段和：查询往前跳 i -= i&-i，
+   单点加往后跳 i += i&-i，两个操作都是 O(log n)，且只用一块数组。 */
+int bit[16];
+
+int lowbit(int x) { return x & -x; }
+
+void add(int i, int delta, int n) {
+    for (; i <= n; i += lowbit(i)) bit[i] += delta;
+}
+
+int prefixSum(int i) {
+    int s = 0;
+    for (; i > 0; i -= lowbit(i)) s += bit[i];
+    return s;
+}
+
+int main() {
+    const int n = 8;
+    int a[9] = {0, 3, 1, 4, 1, 5, 9, 2, 6};   // 1-based
+    memset(bit, 0, sizeof(bit));
+    for (int i = 1; i <= n; ++i) add(i, a[i], n);
+    printf("原数组（1-based）：");
+    for (int i = 1; i <= n; ++i) printf("%d ", a[i]);
+    printf("\\nbit 数组：");
+    for (int i = 1; i <= n; ++i) printf("%d ", bit[i]);
+    printf("\\n\\n前缀和前 6 项 = %d（3+1+4+1+5+9 = 23）\\n", prefixSum(6));
+    printf("区间 [3,7] 之和 = prefix(7)-prefix(2) = %d\\n", prefixSum(7) - prefixSum(2));
+
+    add(4, 10, n);                              // 第 4 项 +10
+    printf("\\n第 4 项加 10 后：\\n  区间 [3,7] = %d（应增加 10）\\n", prefixSum(7) - prefixSum(2));
+    printf("  bit 数组：");
+    for (int i = 1; i <= n; ++i) printf("%d ", bit[i]);
+    printf("\\n  （只有下标 4、8 变了，这就是 O(log n)）\\n");
+    return 0;
+}
+`,
+  },
+  '线段树（4n 数组区间和）': {
+    group: '高级数据结构',
+    stdin: '',
+    code: `#include <cstdio>
+
+/* 完全二叉树的数组表示：节点 p 的左孩子 2p、右孩子 2p+1，
+   开 4n 大小的 tree[] 就够。build / query / update 都是递归 O(log n)。 */
+int tree[64];
+int arr[9] = {0, 3, 1, 4, 1, 5, 9, 2, 6};   // 1-based
+
+void build(int p, int l, int r) {
+    if (l == r) { tree[p] = arr[l]; return; }
+    int m = (l + r) / 2;
+    build(p * 2, l, m);
+    build(p * 2 + 1, m + 1, r);
+    tree[p] = tree[p * 2] + tree[p * 2 + 1];
+}
+
+int query(int p, int l, int r, int ql, int qr) {
+    if (ql <= l && r <= qr) return tree[p];   // 整段命中，直接返回
+    int m = (l + r) / 2, s = 0;
+    if (ql <= m) s += query(p * 2, l, m, ql, qr);
+    if (qr > m)  s += query(p * 2 + 1, m + 1, r, ql, qr);
+    return s;
+}
+
+void update(int p, int l, int r, int idx, int delta) {
+    if (l == r) { tree[p] += delta; return; }
+    int m = (l + r) / 2;
+    if (idx <= m) update(p * 2, l, m, idx, delta);
+    else update(p * 2 + 1, m + 1, r, idx, delta);
+    tree[p] = tree[p * 2] + tree[p * 2 + 1];
+}
+
+int main() {
+    const int n = 8;
+    build(1, 1, n);
+    printf("原数组：");
+    for (int i = 1; i <= n; ++i) printf("%d ", arr[i]);
+    printf("\\n根节点 tree[1] = %d（总和 31）\\n", tree[1]);
+    printf("tree 数组前 15 格：");
+    for (int i = 1; i <= 15; ++i) printf("%d ", tree[i]);
+    printf("\\n\\n区间 [3,7] 之和 = %d\\n", query(1, 1, n, 3, 7));
+    printf("区间 [1,8] 之和 = %d\\n", query(1, 1, n, 1, 8));
+    printf("区间 [6,6] 之和 = %d\\n\\n", query(1, 1, n, 6, 6));
+
+    update(1, 1, n, 4, 10);                   // 第 4 项 +10
+    arr[4] += 10;
+    printf("第 4 项加 10 后：\\n  根 = %d，区间 [3,7] = %d，朴素核对 = %d\\n",
+           tree[1], query(1, 1, n, 3, 7),
+           arr[3] + arr[4] + arr[5] + arr[6] + arr[7]);
+    return 0;
+}
+`,
+  },
+
+  'GoC 第一步：坐标与角度': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// 画布 800x800，原点在正中，x 向右、y 向上，两个方向都是 +-400。
+// 角度单位是度：0 度朝正上方（12 点方向），rt 顺时针、lt 逆时针。
+#include <goc.h>
+#include <cstdio>
+
+int main() {
+    pen.speed(5).size(6).c(2);          // speed 5：一段一段往前走，看得清笔尖在动
+    pen.fd(150);                        // 从原点朝正上方走 150
+    printf("往上走 150 之后：(%.0f, %.0f) 朝向 %.0f 度\\n",
+           pen.getX(), pen.getY(), pen.getAngle());
+
+    pen.c(1).rt(90).fd(100);            // 右转 90 度（朝东）再走 100
+    pen.c(3).lt(90).fd(100);            // 左转回来（又朝北）再走 100
+    pen.bk(80);                         // bk 是倒退着走，笔尖朝向不变
+
+    // pu/moveTo/pd：抬着笔搬个家，落笔继续画。moveTo 本身不留痕迹。
+    pen.pu().moveTo(0, -100).pd().c(1).rt(180).fd(100);
+    printf("最后停在：(%.0f, %.0f) 朝向 %.0f 度\\n",
+           pen.getX(), pen.getY(), pen.getAngle());
+    printf("speed(10) 或 speed(0) 是一步画完；要慢动作就用 1~9。\\n");
+    return 0;
+}
+`,
+  },
+  '正多边形：外角和恒等于 360': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// 「走一条边 + 转 360/n 度」重复 n 次，正好回到出发点、也回到出发时的朝向
+// —— 因为外角和恒等于 360 度。下面六个边数不同的多边形都从同一个点起笔。
+#include <goc.h>
+#include <cstdio>
+
+void polygon(double side, int n, int col) {
+    pen.c(col).pd();
+    for (int i = 0; i < n; ++i) {
+        pen.fd(side);
+        pen.rt(360.0 / n);              // 外角
+    }
+}
+
+int main() {
+    pen.speed(10).size(3);
+    int sides[] = {3, 4, 5, 6, 9, 12};
+    double startX = -120, startY = -260;
+
+    pen.pu().moveTo(startX, startY).pd();
+    for (int i = 0; i < 6; ++i) {
+        polygon(220 - i * 28, sides[i], i + 1);
+        printf("%2d 边形画完，笔尖回到 (%.0f, %.0f)，朝向 %.0f 度\\n",
+               sides[i], pen.getX(), pen.getY(), pen.getAngle());
+    }
+    return 0;
+}
+`,
+  },
+  '分形树：递归 + save/load': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// 递归 + 笔的状态存取：进来时 save() 一份，出去前 load() 还原，
+// 于是每一层都能看到「自己进这一刀之前」的位置、朝向、粗细和颜色。
+// 少了这一对，画完右枝回来时笔尖还挂在枝端，整棵树就歪了。
+#include <goc.h>
+
+void branch(double len, int depth) {
+    if (depth == 0 || len < 6) return;
+    pen.save();                         // 记下当前位置、朝向、笔色
+    pen.size(depth > 5 ? 8 : depth)     // 树干粗、枝梢细
+       .c(depth > 4 ? 6 : (depth > 2 ? 10 : 3))
+       .fd(len);
+
+    pen.rt(26); branch(len * 0.74, depth - 1);   // 右枝：画完被 load() 拉回来
+    pen.lt(50); branch(len * 0.70, depth - 1);   // 左枝：同上
+
+    pen.load();                         // 还原成进这一截之前的样子
+}
+
+int main() {
+    pen.speed(10);
+    pen.pu().moveTo(0, -330).pd();
+    branch(120, 8);
+    pen.text("递归深度 8：2^8 个枝端，save/load 让每一层都能原路退回", 0, 22);
+    return 0;
+}
+`,
+  },
+  '图形全家福：描边与填充': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// 图形类函数都画在「笔尖所在位置」：r/rr 矩形、e/ee 椭圆、o/oo 圆、a/aa 圆弧。
+// 单写是描边，双写是实心；最后一个参数是颜色序号，省略就用当前笔色。
+// a/aa 从笔尖正前方开始扫，第二个参数是扫过的角度（负数逆时针）。
+#include <goc.h>
+
+int main() {
+    pen.speed(10).size(5);
+    double xs[4] = {-300, -100, 100, 300};
+    const char *name[4] = {"r / rr  矩形", "e / ee  椭圆", "o / oo  圆", "a / aa  弧 270 度"};
+
+    for (int i = 0; i < 4; ++i) {
+        pen.c(i + 1).pu().moveTo(xs[i], 220).pd();
+        if (i == 0) pen.r(130, 90);
+        else if (i == 1) pen.e(70, 45);
+        else if (i == 2) pen.o(58);
+        else pen.a(58, 270);
+        pen.text(name[i], 0, 20);
+
+        pen.c(i + 5).pu().moveTo(xs[i], -120).pd();
+        if (i == 0) pen.rr(130, 90);
+        else if (i == 1) pen.ee(70, 45);
+        else if (i == 2) pen.oo(58);
+        else pen.aa(58, 270);
+        pen.text("实心那一排", 0, 18);
+    }
+
+    // 多边形：polXY 逐个记点（收的是画布绝对坐标），pol 一次画完
+    pen.c(11).pu().moveTo(-60, -280).pd();
+    pen.polXY(-60, -280).polXY(60, -280).polXY(90, -340).polXY(-30, -360).pol(1, 12);
+    return 0;
+}
+`,
+  },
+  '随机漫步：rand + 按键继续': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// GoC 那套随机数：srand(定种子) 让画面可复现，rand(lo, hi) 直接在区间里取值。
+// pause(秒) = 在画布上点一下（或按任意键）就继续，等满了就自己往下走。
+#include <goc.h>
+#include <cstdio>
+#include <cmath>
+
+int main() {
+    pen.speed(10).size(3).c(2);
+    pen.pu().moveTo(0, 0).pd();
+    srand(2024);
+
+    for (int i = 1; i <= 200; ++i) {
+        pen.rt(rand(0, 359)).fd(rand(8, 34));
+        // 快走出画面了就悄悄搬回中心：moveTo 抬着笔走，不留痕迹
+        if (fabs(pen.getX()) > 340 || fabs(pen.getY()) > 340) pen.moveTo(0, 0);
+        if (i % 50 == 0)
+            printf("走了 %d 步，现在在 (%.0f, %.0f)\\n", i, pen.getX(), pen.getY());
+        if (i == 100) {
+            printf("画面上点一下鼠标（或按一下键）继续，最多等 20 秒。\\n");
+            int woken = pause(20.0);
+            printf(woken ? "等到了点击。\\n" : "20 秒到了，自己往下走。\\n");
+            pen.c(1).size(6);           // 后半程换个颜色
+        }
+    }
+    printf("一共 200 步，终点 (%.0f, %.0f)。\\n", pen.getX(), pen.getY());
+    return 0;
+}
+`,
+  },
+  '时钟表盘：极坐标与文字': {
+    group: 'GoC 画图',
+    stdin: '',
+    code: `// 0 度朝上、顺时针为正，所以「半径 r、角度 a」换成坐标就是 (r*sin(a), r*cos(a))。
+// sin_deg / cos_deg 收的是角度（<cmath> 里的 sin/cos 收弧度，两者都留着）。
+#include <goc.h>
+
+double px(double r, double deg) { return r * sin_deg(deg); }
+double py(double r, double deg) { return r * cos_deg(deg); }
+
+void hand(double deg, double len, double wide, int col) {
+    pen.pu().moveTo(0, 0).pd().c(col).size(wide).setAngle(deg).fd(len);
+}
+
+int main() {
+    pen.speed(10).c(0);
+    pen.o(320);                                     // 外圈：圆画在笔尖位置，此刻笔尖在原点
+
+    for (int i = 0; i < 60; ++i) {                   // 60 个刻度，整点那 12 个又长又粗
+        double a = i * 6.0;                          // 一分钟走 6 度
+        int major = (i % 5 == 0);
+        pen.pu().moveTo(px(312, a), py(312, a)).pd();
+        pen.size(major ? 6 : 2).setAngle(a).bk(major ? 34 : 14);   // bk：朝圆心里走
+    }
+
+    for (int h = 1; h <= 12; ++h) {                  // 数字：text 写在笔尖，不挪笔
+        pen.pu().moveTo(px(248, h * 30.0), py(248, h * 30.0));
+        pen.text(d2s(h), 0, 34);
+    }
+
+    hand(30.0 * 7 + 15, 150, 12, 2);                 // 7 点半：时针在 7 与 8 正中间
+    hand(6.0 * 30, 235, 7, 1);                       // 分针指着 6
+    pen.c(0).pu().moveTo(-150, -378);
+    pen.text("d2s 把数字写成字符串，text 画在笔尖", 0, 22);
+    return 0;
+}
+`,
+  },
 };
