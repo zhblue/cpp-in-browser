@@ -2453,9 +2453,39 @@ langSel.onchange = () => setLang(langSel.value);
 applyLangChrome();
 fillExamples();
 restoreLocal();
+/* ------------------------------------------------------------------ */
+/* GoC 放大 / 还原：把输出 section 提到屏幕右半边（样式见 index.html 的 */
+/* body.goczoom）。top 跟着「调试条 / 工具条」的下边缘走：调试条随会话   */
+/* 出现和消失，工具条在窄窗口里会换行变高，所以用 ResizeObserver 盯住   */
+/* 这两条，谁的高度变了都重算一次。画布本身的尺寸不用这里操心 ——       */
+/* GOC.setup 里那个 ResizeObserver 盯着 outwrap，放大/还原都会自动重配。 */
+const outSec = $('outsec'), gocZoomBtn = $('goczoom');
+const toolbarEl = document.querySelector('.toolbar');
+function gocZoomFit() {
+  if (!document.body.classList.contains('goczoom')) return;
+  const bar = dbgBar.classList.contains('on') ? dbgBar : toolbarEl;
+  outSec.style.top = Math.ceil(bar.getBoundingClientRect().bottom) + 'px';
+}
+function setGocZoom(on) {
+  document.body.classList.toggle('goczoom', on);
+  gocZoomBtn.textContent = on ? '还原' : '放大';
+  if (on) gocZoomFit(); else outSec.style.top = '';
+  GOC.layout();
+}
+gocZoomBtn.onclick = () => setGocZoom(!document.body.classList.contains('goczoom'));
+if (typeof ResizeObserver !== 'undefined') {
+  try {
+    const zro = new ResizeObserver(gocZoomFit);
+    zro.observe(dbgBar); zro.observe(toolbarEl);
+  } catch (e) { /* 忽略 */ }
+}
+window.addEventListener('resize', gocZoomFit);
+
 /* GoC 画布：绑上 stdout 背后那块 canvas，顺便把「点一下 / 按一键」的唤醒
-   监听挂好。没有画图指令时它一直是 display:none，界面上看不出来。 */
-GOC.setup({ canvas: $('gocv'), out: outEl, wrap: $('outwrap') });
+   监听挂好。没有画图指令时它一直是 display:none，界面上看不出来。
+   放大按钮也一并递进去：画面露出来才出现，reset 时自动还原。 */
+GOC.setup({ canvas: $('gocv'), out: outEl, wrap: $('outwrap'),
+            zoomBtn: gocZoomBtn, onReset: () => setGocZoom(false) });
 GOC.reset(null);
 srcEditor.focus();
 startCompileWorker();

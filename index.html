@@ -121,6 +121,26 @@
   .outwrap.goc #gocv { box-shadow: 0 0 0 1px rgba(0, 0, 0, .16); }
   #out.goc { background: transparent; color: #12271c; border-color: rgba(0, 0, 0, .25); }
 
+  /* ---------- GoC 放大 / 还原 ----------
+     放大时把整个输出 section 提出右栏的 grid，固定到屏幕右半边：宽 50vw、
+     下边贴窗口底，top 由 main.js 按「调试条（没开调试就是工具条）的下边缘」算，
+     所以继续 / 下一行 / 停止那些按钮永远露在外面，调试中途也能放大。
+     画布仍是正方形、边长取宽高里小的那个（goc.js 的 layout），宽屏上由宽度决定。
+     主体同时用 padding-right 把右半边让出来：编辑器和 stdin / 状态栏被挤到
+     左半边，而不是盖在画布底下。z-index 25：压住主体，但低于调试说明浮层
+     和变量悬停框（那两个是 30），停行时看值不受影响。 */
+  body.goczoom main { padding-right: calc(50vw + 12px); }
+  /* 输出 section 飞出去之后右栏只剩 stdin 和状态两格，比例跟着改，
+     不然第三行那 50fr 会空占着 */
+  body.goczoom .right { grid-template-rows: minmax(0, 1fr) auto; }
+  body.goczoom #outsec {
+    position: fixed; z-index: 25; right: 0; bottom: 0; width: 50vw;
+    display: flex; flex-direction: column; min-height: 0;
+    background: var(--bg); border-left: 1px solid var(--line);
+    box-shadow: -10px 0 26px var(--shadow);
+    padding: 8px 14px 12px;
+  }
+
   /* ---------- 状态面板 ---------- */
   .metrics {
     border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -420,10 +440,11 @@
       <div class="headline"><span class="dot" id="dot"></span><span id="msg">正在初始化工具链…</span></div>
     </section>
 
-    <section>
+    <section id="outsec">
       <div class="cap">
         <span>输出 stdout / stderr</span>
-        <span class="cap-right"><span id="outlen"></span><button id="clear" class="danger mini">清空输出</button></span>
+        <span class="cap-right"><span id="outlen"></span><button id="goczoom" class="secondary mini" hidden
+          title="把 GoC 画面放大到占屏幕右半边（调试时也能用，继续/下一行/停止不受影响），再点一次还原。只有程序真画了图才出现；开始新一次运行或清空输出时自动还原。">放大</button><button id="clear" class="danger mini">清空输出</button></span>
       </div>
       <div class="outwrap" id="outwrap">
         <canvas id="gocv" width="800" height="800"></canvas>
@@ -469,6 +490,7 @@
 <script src="vendor/ace/ext-language_tools.js"></script>
 <script src="js/dbgproto.js"></script>
 <script src="js/goc.js"></script>
+<script src="js/examples.goc.js"></script>
 <script src="js/examples.cpp.js"></script>
 <script src="js/examples.py.js"></script>
 <script src="js/langs.js"></script>

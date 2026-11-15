@@ -664,12 +664,17 @@ void srand(unsigned seed) { gocSeed() = seed; }
   /* ==================================================================== */
   /* 3) 主线程侧：画在 stdout 背后的那块画布                               */
   /* ==================================================================== */
-  const ui = { canvas: null, ctx: null, out: null, wrap: null, ctl: null, on: false };
+  const ui = { canvas: null, ctx: null, out: null, wrap: null, ctl: null, on: false,
+               zoomBtn: null, onReset: null };
 
   function setup(els) {
     ui.canvas = els.canvas;
     ui.out = els.out;
     ui.wrap = els.wrap;
+    /* 放大/还原按钮和「画面收起来时顺手还原」的回调都由 main.js 递进来：
+       显隐跟着画面走（reveal 露、reset 收），布局那半边的事 goc.js 不管。 */
+    ui.zoomBtn = els.zoomBtn || null;
+    ui.onReset = typeof els.onReset === 'function' ? els.onReset : null;
     if (ui.canvas) ui.ctx = ui.canvas.getContext('2d');
     const hit = ui.wrap || ui.canvas;
     if (hit && !hit.__gocBound) {
@@ -713,6 +718,7 @@ void srand(unsigned seed) { gocSeed() = seed; }
     if (ui.canvas) ui.canvas.style.display = 'block';
     if (ui.out) ui.out.classList.add('goc');
     if (ui.wrap) ui.wrap.classList.add('goc');
+    if (ui.zoomBtn) ui.zoomBtn.hidden = false;   /* 真画了东西，才给放大的入口 */
     layout();
   }
 
@@ -729,6 +735,10 @@ void srand(unsigned seed) { gocSeed() = seed; }
     if (ui.canvas) ui.canvas.style.display = 'none';
     if (ui.out) ui.out.classList.remove('goc');
     if (ui.wrap) ui.wrap.classList.remove('goc');
+    /* 画面收起来了，放大也就没了意义：按钮藏回去，若正放大着就还原 layout
+       （新一次运行 / 清空输出 / 换语言都走这里）。 */
+    if (ui.zoomBtn) ui.zoomBtn.hidden = true;
+    if (ui.onReset) ui.onReset();
   }
 
   function paintStyle(g, c, w, a, cap) {
